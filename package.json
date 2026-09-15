@@ -1,0 +1,52 @@
+{
+  "name": "dsh-plugin-trellis-statusline",
+  "version": "0.1.0",
+  "description": "Shows the active Trellis task of the current workspace in the dsh web chat, with parent/subtask roles and a clickable task tree.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "license": "MIT",
+  "author": "HenTaiCJN",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "deepseek-harness",
+    "trellis",
+    "statusline",
+    "session-header"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CJ-SH/dsh-plugin-trellis-statusline.git"
+  },
+  "scripts": {
+    "test": "node test/host.test.mjs && node test/client.test.mjs && node test/cell.test.mjs && node test/integration.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  }
+}

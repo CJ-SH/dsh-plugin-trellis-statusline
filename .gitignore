@@ -1,0 +1,6 @@
+# The host and integration harnesses build throwaway workspaces here and remove them again on
+# the way out (including at startup, so a crashed run cleans itself up on the next one). This
+# keeps a half-finished run from ever being committed. Each harness keeps its own directory
+# because both write real `.trellis` trees and must not collide.
+test/.tmp/
+test/.tmp-integration/
