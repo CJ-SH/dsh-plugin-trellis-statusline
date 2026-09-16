@@ -28,23 +28,22 @@ const OTHER_SESSION = 'session-3724610a-d67b-4d50-97ab-e7856427ab12'
 // --- Fake cordis context ----------------------------------------------------------------
 let liveSessions = {}
 let workspaces = []
-const seen = { channel: null, handler: null, disposed: false }
+const seen = { route: null, handler: null, disposed: false }
 
 const services = {
   sessions: { get: (id) => liveSessions[id] },
   workspaceRegistry: { list: () => workspaces },
-  connection: {
-    rpc: {
-      handle(channel, handler) {
-        seen.channel = channel
-        seen.handler = handler
-        return () => {
-          seen.disposed = true
-        }
-      },
+  // The trust fence: the route asks it first and serves only when it answers `undefined`.
+  connection: { requestRejection: () => undefined },
+  webServer: {
+    register(route) {
+      seen.route = route
+      seen.handler = route.handler
+      return () => {
+        seen.disposed = true
+      }
     },
   },
-  webServer: {},
 }
 const effects = []
 const ctx = {
@@ -60,7 +59,47 @@ const ctx = {
 const { apply, inject, name } = await import(hostUrl.href)
 apply(ctx)
 
-const read = (sessionId, extra) => seen.handler('task/read', { sessionId, ...extra })
+/** A response the handler can own: it only calls `writeHead` and `end`. */
+function makeRes() {
+  const res = { status: 0, headers: {}, body: undefined }
+  res.writeHead = (status, headers) => {
+    res.status = status
+    Object.assign(res.headers, headers ?? {})
+  }
+  res.end = (body) => {
+    res.body = body
+  }
+  return res
+}
+
+const parseBody = (body) => {
+  try {
+    return JSON.parse(body)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * One request through the registered route handler.
+ *
+ * @param options.sessionId - query value; `undefined` omits the parameter entirely.
+ * @param options.method - HTTP method, `GET` unless the case is about the method.
+ * @param options.rejection - what the composition's fence answers for this one call.
+ * @returns the status, the headers, the raw body and the parsed envelope.
+ */
+async function callRoute({ sessionId, method = 'GET', rejection } = {}) {
+  const previous = services.connection.requestRejection
+  if (rejection !== undefined) services.connection.requestRejection = rejection
+  const res = makeRes()
+  const query = sessionId === undefined ? '' : `?sessionId=${encodeURIComponent(sessionId)}`
+  await seen.handler({ method, url: `/trellis-statusline/task/read${query}`, headers: {} }, res)
+  services.connection.requestRejection = previous
+  return { status: res.status, headers: res.headers, body: res.body, parsed: parseBody(res.body) }
+}
+
+/** The envelope of one read: the shape every task assertion below consumes. */
+const read = async (sessionId) => (await callRoute({ sessionId })).parsed
 
 // --- Fixture workspaces -----------------------------------------------------------------
 const here = dirname(fileURLToPath(import.meta.url))
@@ -104,22 +143,22 @@ const pointAt = (cwd) => {
 // --- Packaging contract -----------------------------------------------------------------
 check('plugin name is the package name', name, packageJson.name)
 check('inject declares the three required services', inject, ['sessions', 'connection', 'webServer'])
-check('the RPC channel is mounted at the plugin channel', seen.channel, '/trellis-statusline')
-check('the channel registration is wrapped in an effect', typeof effects[0]?.disposer, 'function')
+check('the route is registered at the plugin path', [seen.route?.kind, seen.route?.path], ['exact', '/trellis-statusline/task/read'])
+check('the route registration is wrapped in an effect', typeof effects[0]?.disposer, 'function')
 
-// A row that throws in `apply` fails the whole plugin tree, so an unavailable channel must
-// degrade to "one UI surface fewer" instead of blocking the boot.
+// A row that throws in `apply` fails the whole plugin tree, so a route that cannot register
+// (a duplicate (kind, path) is the one way `register` throws) must degrade to "one UI surface
+// fewer" instead of blocking the boot.
 const logged = []
 const originalError = console.error
 console.error = (message) => logged.push(String(message))
 const throwingCtx = {
   get: () => undefined,
   effect: (callback) => callback(),
-  connection: {
-    rpc: {
-      handle() {
-        throw new Error('cannot get property "webServer" without inject')
-      },
+  connection: { requestRejection: () => undefined },
+  webServer: {
+    register() {
+      throw new Error('duplicate route /trellis-statusline/task/read')
     },
   },
 }
@@ -130,7 +169,7 @@ try {
   survived = false
 }
 console.error = originalError
-check('apply survives an unavailable RPC channel', survived, true)
+check('apply survives an unavailable route', survived, true)
 check('the degradation is logged once', logged.length, 1)
 check('the log names the plugin', logged[0]?.startsWith('[trellis-statusline]'), true)
 
@@ -147,7 +186,7 @@ check('cwd falls back to the workspace registry', (await read(SESSION)).value.ta
 
 workspaces = []
 check('no cwd anywhere is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
-check('a blank sessionId is an empty state', await read(''), { ok: true, value: { status: 'none' } })
+check('a blank sessionId is a bad request', (await callRoute({ sessionId: '' })).status, 400)
 check('an unknown session does not borrow another session\'s workspace', await (async () => {
   workspaces = [{ id: 'ws-1', path: wsLive, sessionIds: [OTHER_SESSION] }]
   const reply = await read(SESSION)
@@ -397,13 +436,39 @@ await writeTask(wsFields, '09-15-fields', { title: 'x'.repeat(80), status: 'in_p
 const long = (await read(SESSION)).value.task.title
 check('a long title is truncated to 48 characters', [long.length, long.endsWith('…')], [48, true])
 
-// --- Protocol ---------------------------------------------------------------------------
-check('an unknown endpoint is the one loud protocol error', await seen.handler('task/write', {}), {
-  ok: false,
-  error: { code: 'unknown-endpoint', message: 'unknown trellis-statusline endpoint: task/write' },
-})
-check('a missing payload does not throw', (await seen.handler('task/read', undefined)).ok, true)
-check('a non-record payload does not throw', (await seen.handler('task/read', 'nonsense')).value.status, 'none')
+// --- Protocol: fence first, then the method, then the query ------------------------------
+const fenced = await callRoute({ sessionId: SESSION, rejection: () => 401 })
+const forbidden = await callRoute({ sessionId: SESSION, rejection: () => 403 })
+const fence = services.connection.requestRejection
+delete services.connection.requestRejection
+const fenceless = await callRoute({ sessionId: SESSION })
+services.connection.requestRejection = fence
+const realGet = services.sessions.get
+let touched = false
+services.sessions.get = () => {
+  touched = true
+  return undefined
+}
+const shortCircuited = await callRoute({ sessionId: SESSION, rejection: () => 401 })
+services.sessions.get = realGet
+check('401 from the fence is answered verbatim', [fenced.status, fenced.body], [401, 'unauthorized'])
+check('403 from the fence is answered verbatim', [forbidden.status, forbidden.body], [403, 'forbidden'])
+check('a composition without the fence fails closed', [fenceless.status, fenceless.body], [503, 'trust fence unavailable'])
+check('the fence runs before any session is read', [shortCircuited.status, touched], [401, false])
+
+const wrongMethod = await callRoute({ sessionId: SESSION, method: 'POST' })
+check('a non-GET method is refused with the method it allows', [wrongMethod.status, wrongMethod.headers.allow], [405, 'GET'])
+const missing = await callRoute({})
+check('a missing sessionId is a bad request', [missing.status, missing.parsed.error.code], [400, 'bad-request'])
+check('an oversized sessionId is a bad request', (await callRoute({ sessionId: 'x'.repeat(129) })).status, 400)
+
+const answered = await callRoute({ sessionId: SESSION })
+check('a good read is 200 JSON in the client envelope', [
+  answered.status,
+  answered.headers['content-type'],
+  answered.parsed.ok,
+], [200, 'application/json; charset=utf-8', true])
+check('the answer is never cached', answered.headers['cache-control'], 'no-store')
 
 // --- AC6: the read path never writes ----------------------------------------------------
 async function snapshot(root) {
@@ -446,10 +511,15 @@ check(
 
 // --- Cross-half contract ----------------------------------------------------------------
 const clientSource = await readFile(clientUrl, 'utf8')
-const endpointsIn = (source) => [...new Set([...source.matchAll(/'([a-z]+\/[a-z]+)'/g)].map((match) => match[1]))].sort()
-check('both halves agree on the channel', [
-  hostSource.includes("const CHANNEL = '/trellis-statusline'"),
-  clientSource.includes("const CHANNEL = '/trellis-statusline'"),
+// Endpoint literals only: a media type (`application/json`) has the same `a/b` shape but is
+// not an endpoint of this plugin's protocol.
+const endpointsIn = (source) =>
+  [...new Set([...source.matchAll(/'([a-z]+\/[a-z]+)'/g)].map((match) => match[1]))]
+    .filter((value) => value !== 'application/json')
+    .sort()
+check('both halves agree on the route prefix', [
+  hostSource.includes("const ROUTE_PREFIX = '/trellis-statusline'"),
+  clientSource.includes("const ROUTE_PREFIX = '/trellis-statusline'"),
 ], [true, true])
 check('both halves agree on the endpoint', endpointsIn(hostSource), ['task/read'])
 check('the client calls the endpoint the host handles', endpointsIn(clientSource), endpointsIn(hostSource))

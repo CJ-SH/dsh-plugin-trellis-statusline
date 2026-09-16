@@ -133,16 +133,41 @@ await writeFile(
 
 // --- Run the real Host half over it --------------------------------------------------------
 const host = await import(hostUrl.href)
-let handler = null
+let routeHandler = null
 const hostServices = {
   sessions: { get: (id) => (id === SESSION ? { header: { id, cwd: scratch } } : undefined) },
   workspaceRegistry: { list: () => [] },
-  connection: { rpc: { handle: (channel, fn) => { handler = fn; return () => undefined } } },
-  webServer: {},
+  connection: { requestRejection: () => undefined },
+  webServer: {
+    register(route) {
+      routeHandler = route.handler
+      return () => undefined
+    },
+  },
 }
 host.apply({ ...hostServices, get: (key) => hostServices[key], effect: (fn) => fn() })
 
-const reply = await handler('task/read', { sessionId: SESSION })
+/** A response the route handler can own: it only calls `writeHead` and `end`. */
+function makeRes() {
+  const res = { status: 0, headers: {}, body: undefined }
+  res.writeHead = (status, headers) => {
+    res.status = status
+    Object.assign(res.headers, headers ?? {})
+  }
+  res.end = (body) => {
+    res.body = body
+  }
+  return res
+}
+/** One real request straight into the registered route. */
+async function askHost(sessionId, method = 'GET') {
+  const res = makeRes()
+  const query = sessionId === undefined ? '' : `?sessionId=${encodeURIComponent(sessionId)}`
+  await routeHandler({ method, url: `/trellis-statusline/task/read${query}`, headers: {} }, res)
+  return { status: res.status, body: res.body, parsed: res.body === undefined ? undefined : JSON.parse(res.body) }
+}
+
+const reply = (await askHost(SESSION)).parsed
 check('the Host resolved the pointed-at child', reply.value.task.id, CHILD_DIR)
 check('the Host attached the tree', reply.value.tree.id, ROOT_DIR)
 check('the tree nests the child and marks it current', [
@@ -158,6 +183,9 @@ const client = factory((request) => {
 })
 
 const caught = []
+// Requests the harness still owes an answer for; `settle` waits for them, because the host
+// half below reads a real `.trellis` tree and one tick is not always enough.
+let inFlight = 0
 const clientServices = {
   slots: {
     inject: (key, callback) => callback(),
@@ -167,8 +195,23 @@ const clientServices = {
     },
   },
   locale: { getLocale: () => ({ active: 'zh' }), register: () => () => undefined },
-  // The one line that matters: whatever the Host just produced is handed back verbatim.
-  connection: { rpc: { call: async () => reply } },
+}
+
+// The one line that matters: the browser's fetch is answered by the Host's real route, so the
+// round trip below crosses the same boundary production uses.
+globalThis.fetch = async (input, init) => {
+  const url = new URL(String(input))
+  inFlight += 1
+  try {
+    const answered = await askHost(url.searchParams.get('sessionId'), init?.method ?? 'GET')
+    return {
+      ok: answered.status >= 200 && answered.status < 300,
+      status: answered.status,
+      json: async () => answered.parsed,
+    }
+  } finally {
+    inFlight -= 1
+  }
 }
 const ctx = {
   ...clientServices,
@@ -190,11 +233,12 @@ function render() {
   for (const [index, effect] of store.pending) store.cleanups[index] = effect() ?? null
   return tree
 }
-async function settle(rounds = 12) {
+async function settle(rounds = 60) {
   let tree = render()
   for (let index = 0; index < rounds; index += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 1))
-    if (!dirty) break
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    // A resolved request marks the tree dirty; an outstanding one must not be waited out.
+    if (!dirty && inFlight === 0) break
     dirty = false
     tree = render()
   }

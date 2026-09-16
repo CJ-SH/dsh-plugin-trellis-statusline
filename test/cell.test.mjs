@@ -159,18 +159,18 @@ const services = {
     getLocale: () => ({ active: 'zh' }),
     register: () => () => undefined,
   },
-  connection: {
-    rpc: {
-      async call(channel, endpoint, payload) {
-        calls.push({ channel, endpoint, payload })
-        if (rejectNext) {
-          rejectNext = false
-          throw new Error('socket closed')
-        }
-        return reply
-      },
-    },
-  },
+}
+
+// The browser half fetches the Host's own route; the harness answers every request from
+// `reply`, so the assertions below keep driving one envelope.
+const askedSession = (call) => new URL(call.url).searchParams.get('sessionId')
+globalThis.fetch = async (input, init) => {
+  calls.push({ url: String(input), init })
+  if (rejectNext) {
+    rejectNext = false
+    throw new Error('socket closed')
+  }
+  return { ok: true, status: 200, json: async () => reply }
 }
 const ctx = {
   ...services,
@@ -247,9 +247,8 @@ const currentRows = (menu) => (menu?.children ?? []).filter((row) => row.props['
 
 // --- 1. A task is active ------------------------------------------------------------------
 const tree = await settle({ sessionId: SESSION })
-check('the cell requested this session', calls[0]?.payload, { sessionId: SESSION })
-check('it used the private channel', calls[0]?.channel, '/trellis-statusline')
-check('it used the read endpoint', calls[0]?.endpoint, 'task/read')
+check('the cell requested this session over the plugin route', calls[0]?.url, `http://dsh.internal/trellis-statusline/task/read?sessionId=${SESSION}`)
+check('the request is a GET accepting JSON', [calls[0]?.init?.method ?? 'GET', calls[0]?.init?.headers?.accept], ['GET', 'application/json'])
 check('the pill reads [P1] title · state', flatten(tree), '[P1] Trellis statusline plugin for dsh web · 进行中')
 check('the pill is one root element', findRoot(tree) !== null, true)
 check('the root carries the state for styling', findRoot(tree)?.props?.['data-status'], 'in_progress')
@@ -306,7 +305,7 @@ check('a task without a priority drops the bracket', flatten(await settle({ sess
 reply = { ok: true, value: { status: 'ok', task: TASK } }
 const before = calls.length
 await settle({ sessionId: OTHER })
-check('a new sessionId triggers its own request', [calls.length - before, calls.at(-1)?.payload], [1, { sessionId: OTHER }])
+check('a new sessionId triggers its own request', [calls.length - before, askedSession(calls.at(-1))], [1, OTHER])
 check('a new sessionId starts its own interval', intervals.length, 2)
 check('a new sessionId disposes the previous interval', disposed, [10_000])
 
@@ -485,7 +484,7 @@ const beforeHero = calls.length
 const hero = await settleWith(HeroCell, heroProps(true))
 check('a blank session draws an overlay entry', heroBoxOf(hero) !== null, true)
 check('the hero pill reads the same task', flatten(hero), '[P1] Parent system · 规划中 · 父任务')
-check('the hero pill requests the current session', [calls.length - beforeHero, calls.at(-1)?.payload], [1, { sessionId: SESSION }])
+check('the hero pill requests the current session', [calls.length - beforeHero, askedSession(calls.at(-1))], [1, SESSION])
 check('the hero pill is the same clickable shape', pillOf(hero)?.type, 'button')
 
 // Unmeasurable layout (no composer yet) must not draw a pill at a wrong place.

@@ -2,17 +2,10 @@
 #
 # The plugin reads its input from the session's own working directory and holds no
 # configuration of its own — there is nothing here for a user to edit.
+#
+# No other bundle's row is touched. The Host half registers its own route on the composition's
+# `webServer` and asks `connection` for the trust fence per request (`requestRejection`), so
+# there is no `inject` list to widen and no shipped value to restate.
 - insert:
     - id: trellis-statusline
       name: 'dsh-plugin-trellis-statusline'
-
-# `connection.rpc.handle` implements every channel as a web route registered on the Context
-# that *reads* the connection service, and the shipped `connection` row injects only
-# `webRuntime` — so registering a channel throws `cannot get property "webServer" without
-# inject`. Widen that row's inject list. `inject` is a whole-value override, so the shipped
-# entry must be restated verbatim, and the value is identical to the one
-# dsh-plugin-ollama-usage writes, so installing both plugins stays idempotent.
-- id: connection
-  inject:
-    - webRuntime
-    - webServer

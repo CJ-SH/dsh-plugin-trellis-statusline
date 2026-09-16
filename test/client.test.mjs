@@ -62,7 +62,7 @@ const exported = factory((request) => {
 })
 check('bundle requires only react', required, ['react'])
 check('bundle exports apply + inject', [typeof exported.apply, Array.isArray(exported.inject)], ['function', true])
-check('declared services', exported.inject, ['slots', 'locale', 'connection', 'timer'])
+check('declared services', exported.inject, ['slots', 'locale', 'timer'])
 
 // --- Fake cordis context ----------------------------------------------------------------
 const injected = []
@@ -87,7 +87,8 @@ const services = {
       return () => undefined
     },
   },
-  connection: { rpc: { call: async () => ({ ok: true, value: { status: 'none' } }) } },
+  // No `connection` service: the browser half fetches the Host's own route instead of
+  // calling a channel on the connection service.
   timer: { interval: () => () => undefined },
 }
 const effects = []
@@ -182,12 +183,17 @@ check('stylesheet disposer removes the tag', (() => {
 // --- Cross-half contract: every endpoint the client calls exists on the host -------------
 const clientSource = await readFile(clientUrl, 'utf8')
 const hostSource = await readFile(hostUrl, 'utf8')
-const endpointsIn = (source) => [...new Set([...source.matchAll(/'([a-z]+\/[a-z]+)'/g)].map((match) => match[1]))].sort()
+// Endpoint literals only: a media type (`application/json`) has the same `a/b` shape but is
+// not an endpoint of this plugin's protocol.
+const endpointsIn = (source) =>
+  [...new Set([...source.matchAll(/'([a-z]+\/[a-z]+)'/g)].map((match) => match[1]))]
+    .filter((value) => value !== 'application/json')
+    .sort()
 check('client calls exactly the endpoints the host handles', endpointsIn(clientSource), endpointsIn(hostSource))
 check('the endpoint set is the expected one', endpointsIn(hostSource), ['task/read'])
-check('client and host agree on the channel', [
-  clientSource.includes("const CHANNEL = '/trellis-statusline'"),
-  hostSource.includes("const CHANNEL = '/trellis-statusline'"),
+check('client and host agree on the route prefix', [
+  clientSource.includes("const ROUTE_PREFIX = '/trellis-statusline'"),
+  hostSource.includes("const ROUTE_PREFIX = '/trellis-statusline'"),
 ], [true, true])
 check('apply starts no poll of its own', intervals.length, 0)
 check('the client owns the poll interval', clientSource.includes('REFRESH_INTERVAL_MS = 10_000'), true)
