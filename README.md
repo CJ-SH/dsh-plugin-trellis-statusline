@@ -131,15 +131,16 @@ The display refreshes every 10 s, and immediately when the header switches to an
 1. **The session's working directory** — from the live session's own header, or from the workspace
    registry, which also covers sessions that are no longer live.
 2. **The session pointer** — `.trellis/.runtime/sessions/dsh_<sessionId>.json`, which
-   `task.py start` writes. It wins whenever it names a real task.
-3. **A scan of `.trellis/tasks/*/task.json`** — `in_progress` before `planning`, and among equals
-   the newest `MM-DD-` task. A scanned task must also have been **started at least once**, which a
-   recorded `branch` proves.
+   `task.py create` / `task.py start` writes. It is the **only** evidence, and what it names is
+   shown whatever its status or branch.
 
-That last rule earns its keep: `trellis init` leaves a scaffolding task (`Bootstrap Guidelines`) at
-`status: in_progress` with no `branch`, forever. Without the check, every fresh Trellis project
-would report it as active work — four of the five real workspaces this was built against had
-exactly that stale task. See [design notes](./docs/design-notes.md#1-resolving-the-task).
+No usable pointer — never written, stale, pointing outside `.trellis`, or naming a corrupt file —
+means the plugin shows **nothing**. It does not fall back to scanning `.trellis/tasks/`: a scan
+cannot tell which session is working on which task. In the reported bug one workspace held three dsh
+sessions, each on a different task, and all three were shown the same task as 父任务. It does not
+infer a task from the conversation or from the session log either. Reporting nothing beats reporting
+the wrong thing — and it is what `task.py current` itself answers. See
+[design notes](./docs/design-notes.md#1-resolving-the-task).
 
 ## What it does not do
 
@@ -148,30 +149,31 @@ exactly that stale task. See [design notes](./docs/design-notes.md#1-resolving-t
 - It does not start, switch or archive tasks — that stays `task.py`'s job. The dropdown is a view,
   not a control: its rows are not clickable.
 - It does not repeat what dsh already shows (model, tokens, elapsed time).
-- It has nothing to show for a `review` task found by the *scan* (the pointer still displays it,
-  as `审核中` / `in review`). Widen `RUNNING_STATUSES` in `lib/index.js` to change that.
+- It does not guess. A session without a pointer gets no pill, no placeholder and no
+  "best effort" task — see [Where the task comes from](#where-the-task-comes-from).
 
 ## Troubleshooting
 
-**Nothing appears at all.** In order of likelihood: the workspace has no `.trellis/`; it has one but
-no task was ever started in it (see [the branch rule](#where-the-task-comes-from)); you are in the
+**Nothing appears at all.** In order of likelihood: the workspace has no `.trellis/`; no
+`dsh_<sessionId>.json` pointer was written for *this* session, which `task.py create` /
+`task.py start` writes (see [Where the task comes from](#where-the-task-comes-from)); you are in the
 new-session view and the composer could not be measured; another bundle claims the exact route
 `/trellis-statusline/task/read` (the Host logs `[trellis-statusline] route unavailable` at boot);
 or a dsh upgrade moved the seats. The plugin never shows a placeholder and never reports an error —
 an absent pill *is* the failure mode, by design.
 
-**It shows the wrong task.** Check `python ./.trellis/scripts/task.py current --source`. If that
-disagrees with the pill, the plugin's scan and Trellis' pointer resolution have diverged — please
-open an issue with both.
+**It shows the wrong task.** Both sides read the same pointer, so start with
+`python ./.trellis/scripts/task.py current --source`: the pill shows the task that file names. If
+the file itself names the wrong task (next entry), that is Trellis state to fix, not the plugin's.
 
-**It shows the workspace's newest task instead of the one you started.** If dsh was launched from
-inside another Trellis session — a Claude Code or Codex window, say — Trellis 0.6.15 inherits that
-session's `TRELLIS_CONTEXT_ID` and can write the runtime pointer under the *outer* context key
-(the general case is tracked upstream, [`mindfold-ai/Trellis#549`](https://github.com/mindfold-ai/Trellis/issues/549);
-Trellis 0.6.15 fixed it for dsh specifically). This plugin then finds no
-pointer for its own session and falls back to the workspace scan — which is precisely why that
-fallback exists. Unset `TRELLIS_CONTEXT_ID` before starting dsh, or run
-`python ./.trellis/scripts/task.py start .trellis/tasks/<dir>` in the dsh session itself.
+**A session that is working on a task shows nothing.** The session has no pointer. The usual cause:
+dsh was launched from inside another Trellis session — a Claude Code or Codex window, say — and
+Trellis 0.6.15 inherited that session's `TRELLIS_CONTEXT_ID` and wrote the runtime pointer under the
+*outer* context key (the general case is tracked upstream,
+[`mindfold-ai/Trellis#549`](https://github.com/mindfold-ai/Trellis/issues/549); 0.6.15 fixed it for
+dsh specifically). Unset `TRELLIS_CONTEXT_ID` before starting dsh, or run
+`python ./.trellis/scripts/task.py start .trellis/tasks/<dir>` in the dsh session itself. A session
+without a pointer shows nothing rather than another session's task.
 
 **It appears in one session but not another.** That is the design: each session reports its own
 working directory, so parallel sessions in different workspaces show different tasks.
@@ -183,7 +185,7 @@ consumes, the Host half imports nothing beyond `node:` builtins, and the suite a
 
 ```bash
 node --check lib/index.js && node --check lib/client.js   # both halves parse
-npm test                                                  # 197 assertions, four harnesses
+npm test                                                  # 195 assertions, four harnesses
 ```
 
 The harnesses live in the repository, not in the published tarball — `files` ships only `lib`, the
@@ -191,7 +193,7 @@ patch, the README, the design notes and the licence — so run `npm test` from a
 
 | Harness | Covers |
 |---|---|
-| `test/host.test.mjs` | resolving the task against throwaway workspaces: pointer first, scan fallback, ranking, the `branch` rule, every tree case, and a before/after hash proof that a read never writes |
+| `test/host.test.mjs` | resolving the task against throwaway workspaces: the pointer as the only evidence, every no-evidence state (missing, stale, escaping, corrupt), every tree case, and a before/after hash proof that a read never writes |
 | `test/client.test.mjs` | the bundle contract: id, the `react`-only require, both seats (slot key vs cell id vs order), locale namespace, stylesheet lifecycle, cross-half constants |
 | `test/cell.test.mjs` | the real cells under a minimal hook runtime: all three pill shapes, the dropdown and its dismissal routes, the Hero cell's blank-session gating and measured position, listener and interval cleanup |
 | `test/integration.test.mjs` | the two halves against each other — the real Host half reads a real `.trellis` tree and that exact reply is fed to the real cell, so a wire-shape drift cannot pass unnoticed |

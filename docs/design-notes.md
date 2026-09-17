@@ -19,42 +19,47 @@ sessionId
   └─ cwd        ctx.sessions.get(id).header.cwd          (live session)
                 ctx.workspaceRegistry.list()             (persisted session, canonical-cwd index)
   └─ pointer    <cwd>/.trellis/.runtime/sessions/dsh_<sessionId>.json  → current_task
-  └─ scan       <cwd>/.trellis/tasks/<dir>/task.json
   └─ nothing
 ```
+
+The pointer is the **only** evidence. There is no workspace scan behind it, by decision — see
+[Why the workspace scan was removed](#why-the-workspace-scan-was-removed-2026-09-17).
 
 Both cwd sources are synchronous, and both were confirmed in a live dsh process: for the same
 session they returned the same workspace path. The registry matters because it also covers
 sessions that are no longer live — a closed session still resolves to its workspace.
 
-### Why a scanned task must have a `branch`
+### Why the workspace scan was removed (2026-09-17)
 
-`trellis init` creates a scaffolding task — `Bootstrap Guidelines` — with
-`status: "in_progress"` and `branch: null`, and nothing ever moves it on. In five real workspaces
-on the development machine, four still had exactly that task.
+An earlier version fell back to scanning `<cwd>/.trellis/tasks/<dir>/task.json` — `in_progress`
+before `planning`, the lexicographically greatest `MM-DD-` name winning ties, and a required
+`branch` to filter out `trellis init`'s scaffolding task. (`trellis init` creates
+`Bootstrap Guidelines` at `status: in_progress` with `branch: null` and never moves it on; four of
+five real workspaces on the development machine still carried exactly that task. `task.py start`
+flips `planning → in_progress`, records the checked-out branch **and** writes the pointer, so a
+recorded `branch` was a decent proxy for "some session started this task".)
 
-Trellis itself never scans `tasks/`: `resolve_active_task()` reads only the session pointer. So
-Trellis reports "no active task" for those four workspaces while a naive scan reports
-`Bootstrap Guidelines` as active work. That is the bug this rule exists to prevent.
+That rule fixed the scaffolding false positive but could not answer the question the pill asks,
+because a scan has no idea *which* session is working on what. In the reported incident one
+workspace held three dsh sessions on three different tasks, and all three were shown the same
+`in_progress` task — the only one with a branch — labelled 父任务. Two sessions saw a task that was
+not theirs, and their own subtasks never appeared.
 
-`task.py start` is the command that writes the pointer, flips `planning → in_progress`, **and**
-records the checked-out branch — its own comment says recording at start "is what keeps `branch`
-trustworthy". So a recorded `branch` is a precise proxy for "a session actually started this
-task", and the scan requires it.
+Trellis itself never scans `tasks/`: `resolve_active_task()` reads only the session pointer, and
+`task.py current --source` answers `none` in exactly the states where the scan used to guess. The
+plugin now does the same:
 
-The **pointer path is deliberately not filtered this way**. A pointer is itself evidence that a
-session started the task, and a non-git workspace records no branch at all, so filtering there
-would break exactly the case the pointer is best at.
-
-Known cost: in a non-git workspace, a task started by *another* session is invisible to the scan.
-Reporting nothing beats reporting the wrong thing.
-
-### Verified behaviour
-
-| Workspace | Before the rule | After |
+| Workspace state | Before | Now |
 |---|---|---|
-| the plugin's own workspace | the real task | unchanged |
-| four other real workspaces | `[P1] Bootstrap Guidelines · in_progress` | nothing |
+| a pointer naming a real task | that task | unchanged |
+| pointer missing, other sessions' work present | the newest started running task (usually not this session's) | nothing |
+| `trellis init` scaffolding only | nothing (the `branch` rule) | nothing |
+| pointer stale / escaping / naming a corrupt file | the scan's best guess | nothing |
+
+The alternatives to the scan were rejected on purpose: reading the live session's event stream or
+decoding the session log are heuristics over dsh internals, they only work within one process
+lifetime, and they read conversation content. The pointer is the one trustworthy, risk-free source
+(decision D1=(a) in task `09-16-statusline-session-identity`).
 
 `tasks/archive` is skipped explicitly, mirroring `task_store.py`'s own
 `candidate.name == DIR_ARCHIVE` check rather than relying on archived tasks happening to live a
@@ -68,10 +73,9 @@ Roles are deliberately limited to two: the tree's **top ancestor** is the only �
 other member — grandchildren included — is a 子任务. Depth therefore never changes the wording, and
 the dropdown owns the actual structure.
 
-The tree is derived from the **active** task set (skipping `archive`), and the scan's status and
-branch filters deliberately do not apply: a tree that hid its `completed` or never-started members
-would misrepresent the structure it exists to show, and `task.py list` walks the same unfiltered
-set.
+The tree is derived from the **active** task set (skipping `archive`), with no status or branch
+filter: a tree that hid its `completed` or never-started members would misrepresent the structure it
+exists to show, and `task.py list` walks the same unfiltered set.
 
 ### Deriving links
 
@@ -228,7 +232,7 @@ sending `false`. The handler runs four steps, and the order is the design:
 2. **The method.** `GET` only; anything else is `405` with `Allow: GET`.
 3. **The query.** `sessionId` must be a non-empty string of at most 128 characters; otherwise
    `400` in the same envelope, so the browser half's decode logic stays one shape.
-4. **The read.** The session → cwd → pointer → scan → tree chain above.
+4. **The read.** The session → cwd → pointer → tree chain above.
 
 The envelope is deliberately the one the connection service used to carry, and every answer is
 `cache-control: no-store` — a session's task is a live fact, not a cached one.
@@ -259,7 +263,7 @@ way. The typed alternative — a Typert Remote — needs generated invocation de
 plugin is deliberately dependency-free and buildless.
 
 In practice the pill is its own proof: it is rendered from this route, so a visible pill means
-session → cwd → pointer → scan and the fence all worked.
+session → cwd → pointer and the fence all worked.
 
 ---
 

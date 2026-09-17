@@ -1,7 +1,7 @@
 /**
  * Host-half harness. Mounts the real Host half against a fake cordis context and a
  * throwaway workspace on disk, so the whole resolution chain — session → cwd → session
- * pointer → workspace scan → none — is observable without dsh running.
+ * pointer → none (or nothing at all) — is observable without dsh running.
  *
  *   node test/host.test.mjs
  *
@@ -107,8 +107,8 @@ const scratch = join(here, '.tmp')
 await rm(scratch, { recursive: true, force: true })
 await mkdir(scratch, { recursive: true })
 
-// `branch` is what `task.py start` records; a task without one was never started. Scan
-// fixtures carry it so they look like real work, and the dedicated cases below omit it.
+// `branch` is what `task.py start` records; a task without one was never started. Fixtures
+// carry it so they look like real work, though the resolution below never reads it.
 const taskJson = (title, status, priority = 'P2', branch = 'master') => ({
   id: title,
   name: title,
@@ -174,8 +174,11 @@ check('the degradation is logged once', logged.length, 1)
 check('the log names the plugin', logged[0]?.startsWith('[trellis-statusline]'), true)
 
 // --- cwd resolution (design.md §2.1, conclusions A and B) --------------------------------
+// The cwd is observable *through* the pointer: the pointer file only exists under the cwd this
+// half resolved, so a resolved task proves the cwd came from the intended place.
 const wsLive = await makeWorkspace('live')
 await writeTask(wsLive, '09-15-alpha', taskJson('Alpha task', 'in_progress', 'P1'))
+await writePointer(wsLive, SESSION, '.trellis/tasks/09-15-alpha')
 
 pointAt(wsLive)
 check('cwd comes from the live session header', (await read(SESSION)).value.task.id, '09-15-alpha')
@@ -194,53 +197,38 @@ check('an unknown session does not borrow another session\'s workspace', await (
   return reply
 })(), { ok: true, value: { status: 'none' } })
 
-// --- D1 step 2: the session pointer wins over the scan -----------------------------------
+// --- The session pointer is the only evidence (prd.md AC-S1, D1=(a)) ----------------------
 const wsPointer = await makeWorkspace('pointer')
 pointAt(wsPointer)
-// The pointed-at task is deliberately never-started (no `branch`): a pointer is direct
-// evidence that a session started the task, so the pointer path does not apply the
-// scan's "was it ever started" filter — it must still win here.
-await writeTask(wsPointer, '09-15-older', { ...taskJson('Older planning task', 'planning', 'P3'), branch: null })
+// A running, started task with no pointer for *this* session says nothing about this session.
+// Before D1=(a) the workspace scan reported it anyway — the false positive this task removes.
 await writeTask(wsPointer, '09-16-newer', taskJson('Newer in-progress task', 'in_progress', 'P1'))
+check('a started running task is not reported without a session pointer', await read(SESSION), {
+  ok: true,
+  value: { status: 'none' },
+})
+
+// A pointer is direct evidence that this session started the task, so what it names is shown
+// unfiltered: even a never-started (`branch: null`) planning task beats every heuristic the
+// scan had, and the scan's status/branch ranking plays no part anymore.
+await writeTask(wsPointer, '09-15-older', { ...taskJson('Older planning task', 'planning', 'P3'), branch: null })
 await writePointer(wsPointer, SESSION, '.trellis/tasks/09-15-older')
-check('an explicit session pointer outranks the scan', (await read(SESSION)).value.task, {
+check('an explicit session pointer names the task', (await read(SESSION)).value.task, {
   id: '09-15-older',
   title: 'Older planning task',
   status: 'planning',
   priority: 'P3',
 })
 
-// --- D1 step 3: the scan, its ranking and its tie-break ----------------------------------
-const wsScan = await makeWorkspace('scan')
-pointAt(wsScan)
-await writeTask(wsScan, '09-15-alpha', taskJson('Alpha planning', 'planning'))
-await writeTask(wsScan, '09-16-beta', taskJson('Beta in progress', 'in_progress'))
-check('in_progress outranks planning', (await read(SESSION)).value.task.id, '09-16-beta')
-
-await writeTask(wsScan, '09-17-gamma', taskJson('Gamma also in progress', 'in_progress'))
-await writeTask(wsScan, '09-18-delta', taskJson('Delta also in progress', 'in_progress'))
-check('equal ranks take the lexicographically greatest directory name', (await read(SESSION)).value.task.id, '09-18-delta')
-
-await writeTask(wsScan, '09-19-epsilon', taskJson('Epsilon completed', 'completed'))
-check('a completed task is not a candidate', (await read(SESSION)).value.task.id, '09-18-delta')
-
-// A never-started task is skipped even when it would otherwise win the tie-break.
-await writeTask(wsScan, '09-20-never-started', { ...taskJson('Never started', 'in_progress'), branch: null })
-check('a never-started task is not a scan candidate', (await read(SESSION)).value.task.id, '09-18-delta')
-
-// A pointer that names something unusable must degrade to the scan, not to an error.
-await writePointer(wsScan, SESSION, '.trellis/tasks/does-not-exist')
-check('a stale pointer falls through to the scan', (await read(SESSION)).value.task.id, '09-18-delta')
-await writePointer(wsScan, SESSION, '../../../../etc/passwd')
-check('a pointer escaping .trellis is refused', (await read(SESSION)).value.task.id, '09-18-delta')
-await writePointer(wsScan, SESSION, '.trellis/tasks/09-18-delta')
-await writeFile(join(wsScan, '.trellis', 'tasks', '09-18-delta', 'task.json'), '{ not json')
-check('a corrupt pointed-at task.json falls through to the scan', (await read(SESSION)).value.task, {
-  id: '09-17-gamma',
-  title: 'Gamma also in progress',
-  status: 'in_progress',
-  priority: 'P2',
-})
+// A pointer that names something unusable is still no evidence: none, never a guess at the
+// workspace's newest running task.
+await writePointer(wsPointer, SESSION, '.trellis/tasks/does-not-exist')
+check('a stale pointer is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
+await writePointer(wsPointer, SESSION, '../../../../etc/passwd')
+check('a pointer escaping .trellis is refused', await read(SESSION), { ok: true, value: { status: 'none' } })
+await writePointer(wsPointer, SESSION, '.trellis/tasks/09-16-newer')
+await writeFile(join(wsPointer, '.trellis', 'tasks', '09-16-newer', 'task.json'), '{ not json')
+check('a corrupt pointed-at task.json is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
 
 // --- The task tree (design.md §3.3, R6-R9) -----------------------------------------------
 // Every case from the §3.5 table, driven through the real handler against real files.
@@ -284,8 +272,8 @@ check('the tree is rooted at the session task when that is the root', await tree
   priority: 'P2',
   current: true,
   children: [
-    // A `completed` sibling is a member of the structure, so it appears — the scan's status
-    // and branch filters deliberately do not apply here.
+    // A `completed` sibling is a member of the structure, so it appears — status and branch
+    // deliberately do not filter a tree.
     { id: '09-11-alpha', title: '09-11-alpha', status: 'completed', priority: 'P3' },
     {
       id: '09-12-beta',
@@ -334,7 +322,7 @@ check('an archived child name stays out of the tree', (await treeAt('09-50-paren
   '09-51-here',
 ])
 
-// A never-started member is invisible to the scan but is still part of the structure.
+// A never-started member is still part of the structure.
 await writeNode('09-90-parent', { children: ['09-91-never'] })
 await writeNode('09-91-never', { parent: '09-90-parent', branch: null })
 check('a never-started member still appears in the tree', (await treeAt('09-90-parent')).children.map((n) => n.id), [
@@ -372,10 +360,10 @@ const wsEmpty = await makeWorkspace('empty')
 pointAt(wsEmpty)
 check('a workspace with no tasks is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
 
-// --- The reported false positive: `trellis init` scaffolding is not active work -----------
-// Every fresh Trellis project carries this task at `status: in_progress` with `branch: null`,
-// forever, because nothing ever started it. Reporting it made the pill claim that a
-// never-touched setup task was the workspace's active work.
+// --- The reported false positive: another session's work is not this session's work -------
+// `trellis init` leaves a scaffolding task at `status: in_progress` with `branch: null`
+// forever, and a started task looks the same to a scan whether or not *this* session is the one
+// working on it. Neither is evidence about this session, so neither is reported.
 const wsScaffold = await makeWorkspace('scaffold')
 pointAt(wsScaffold)
 const scaffold = {
@@ -391,9 +379,14 @@ const scaffold = {
 await writeTask(wsScaffold, '00-bootstrap-guidelines', scaffold)
 check('a never-started scaffolding task is not reported', await read(SESSION), { ok: true, value: { status: 'none' } })
 
-// The same file, differing only in the one field `task.py start` writes.
+// The same file, differing only in the one field `task.py start` writes: started, and still
+// not this session's task.
 await writeTask(wsScaffold, '00-bootstrap-guidelines', { ...scaffold, branch: 'master' })
-check('the same task counts once it has been started', (await read(SESSION)).value.task, {
+check('a started task is still not this session\'s task', await read(SESSION), { ok: true, value: { status: 'none' } })
+
+// The pointer is the one thing that reports it — status and branch stay irrelevant.
+await writePointer(wsScaffold, SESSION, '.trellis/tasks/00-bootstrap-guidelines')
+check('a pointer reports the scaffolding task it names', (await read(SESSION)).value.task, {
   id: '00-bootstrap-guidelines',
   title: 'Bootstrap Guidelines',
   status: 'in_progress',
@@ -401,11 +394,20 @@ check('the same task counts once it has been started', (await read(SESSION)).val
 })
 
 // Trellis' own walk skips the `archive` directory (`task_store.py`: `candidate.name ==
-// DIR_ARCHIVE`), and so must this one — a started task parked under it is not active.
+// DIR_ARCHIVE`), and so does the tree: a hand-moved child parked under `tasks/archive/` is not
+// a member of the structure its parent claims — the parent stays stand-alone.
 const wsArchivedDir = await makeWorkspace('archived-dir')
 pointAt(wsArchivedDir)
+await writeTask(wsArchivedDir, '09-80-parent', {
+  ...taskJson('Parent task', 'in_progress'),
+  children: ['09-15-done'],
+})
 await writeTask(wsArchivedDir, join('archive', '2026-09', '09-15-done'), taskJson('Archived by hand', 'in_progress'))
-check('a task under tasks/archive is not a candidate', await read(SESSION), { ok: true, value: { status: 'none' } })
+await writePointer(wsArchivedDir, SESSION, '.trellis/tasks/09-80-parent')
+check('a task under tasks/archive is not part of the tree', await read(SESSION), {
+  ok: true,
+  value: { status: 'ok', task: { id: '09-80-parent', title: 'Parent task', status: 'in_progress', priority: 'P2' } },
+})
 
 const wsNoTrellis = join(scratch, 'no-trellis')
 await mkdir(wsNoTrellis, { recursive: true })
@@ -419,11 +421,14 @@ const wsBroken = await makeWorkspace('broken')
 pointAt(wsBroken)
 await writeTask(wsBroken, '09-15-broken', taskJson('Broken', 'in_progress'))
 await writeFile(join(wsBroken, '.trellis', 'tasks', '09-15-broken', 'task.json'), '{ not json')
-check('a corrupt task.json is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
+check('a workspace whose only task.json is corrupt is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
 
 // --- Field discipline -------------------------------------------------------------------
 const wsFields = await makeWorkspace('fields')
 pointAt(wsFields)
+// The pointer is what makes this session's task readable at all; these cases are about how one
+// `task.json` is narrowed into the wire shape, not about which task is picked.
+await writePointer(wsFields, SESSION, '.trellis/tasks/09-15-fields')
 await writeTask(wsFields, '09-15-fields', { title: '  Spaced title  ', status: 'in_progress', priority: '', branch: 'master' })
 check('a blank priority is omitted, not defaulted', (await read(SESSION)).value.task, {
   id: '09-15-fields',
@@ -488,9 +493,9 @@ async function snapshot(root) {
   await walk(root)
   return rows
 }
-// Both a plain scan workspace and a tree workspace: building a tree reads every task.json, so
-// it is the wider read path and deserves its own proof that reading never writes.
-for (const root of [wsScan, wsTree]) {
+// A plain pointer workspace and a tree workspace: building a tree reads every task.json, so it
+// is the wider read path and deserves its own proof that reading never writes.
+for (const root of [wsLive, wsTree]) {
   pointAt(root)
   const before = await snapshot(join(root, '.trellis'))
   for (const sessionId of [SESSION, OTHER_SESSION, '']) await read(sessionId)
