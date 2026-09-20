@@ -22,6 +22,8 @@ const check = (label, actual, expected) => {
 }
 
 const SESSION = 'session-66d44746-abbf-4a3d-bd21-a9374eae2bd1'
+// A session that never wrote a pointer: it must get the workspace count, never a title.
+const OTHER_SESSION = 'session-4c1f5a2e-0000-4000-8000-000000000000'
 const ROOT_DIR = '09-10-release'
 const CHILD_DIR = '09-11-importer'
 
@@ -135,7 +137,9 @@ await writeFile(
 const host = await import(hostUrl.href)
 let routeHandler = null
 const hostServices = {
-  sessions: { get: (id) => (id === SESSION ? { header: { id, cwd: scratch } } : undefined) },
+  sessions: {
+    get: (id) => (id === SESSION || id === OTHER_SESSION ? { header: { id, cwd: scratch } } : undefined),
+  },
   workspaceRegistry: { list: () => [] },
   connection: { requestRejection: () => undefined },
   webServer: {
@@ -224,23 +228,23 @@ client.apply(ctx)
 const Cell = caught[0]?.component
 check('the client registered a cell to drive', typeof Cell, 'function')
 
-function render() {
+function render(sessionId = SESSION) {
   active = Cell
   cursor = 0
   const store = storeOf(Cell)
   store.pending = []
-  const tree = Cell({ sessionId: SESSION })
+  const tree = Cell({ sessionId })
   for (const [index, effect] of store.pending) store.cleanups[index] = effect() ?? null
   return tree
 }
-async function settle(rounds = 60) {
-  let tree = render()
+async function settle(rounds = 60, sessionId = SESSION) {
+  let tree = render(sessionId)
   for (let index = 0; index < rounds; index += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2))
     // A resolved request marks the tree dirty; an outstanding one must not be waited out.
     if (!dirty && inFlight === 0) break
     dirty = false
-    tree = render()
+    tree = render(sessionId)
   }
   return tree
 }
@@ -285,6 +289,43 @@ check('no field of the reply was left unused', [
   reply.value.tree.priority,
   reply.value.tree.children[0].title,
 ], ['P2', 'P1', 'Wire the importer'])
+
+// --- A session the pointer does not name: the workspace count, and no title anywhere -------
+const unnamed = await askHost(OTHER_SESSION)
+check('a session without a pointer gets the workspace count', unnamed.parsed.value, {
+  status: 'workspace',
+  activeTasks: 2,
+})
+check('and that reply carries no task at all', Object.hasOwn(unnamed.parsed.value, 'task'), false)
+
+const countPill = await settle(60, OTHER_SESSION)
+check('the count renders as the workspace sentence', flatten(countPill), '工作区 2 个活动任务')
+check('the count pill is a plain span with no role chip', [
+  findByClass(countPill, 'trellis-statusline-pill')?.type,
+  findByClass(countPill, 'trellis-statusline-role'),
+], ['span', null])
+// The outer box is what pins the pill's font metrics (`font:inherit` resolves against
+// `.trellis-statusline`); a count pill rendered without it inherits the host's font size and
+// looks oversized next to the task pill — which is exactly what shipped once.
+check('the count pill keeps the same wrapper the task pill uses', [
+  findByClass(countPill, 'trellis-statusline')?.props?.className,
+  findByClass(countPill, 'trellis-statusline')?.props?.['data-role'],
+], ['trellis-statusline', 'none'])
+check('and it opens no menu when clicked', findByClass(countPill, 'trellis-statusline-pill')?.props?.onClick, undefined)
+// The glyph is decoration: one inline 14x14 svg, outside the accessibility tree and unreachable by
+// keyboard, while the pill itself stays the plain non-interactive span R2 describes.
+check('the count pill leads with a decoration-only glyph', (() => {
+  const glyph = findByClass(countPill, 'trellis-statusline-glyph')
+  return [glyph?.type, glyph?.props?.['aria-hidden'], glyph?.props?.focusable, glyph?.props?.viewBox, glyph?.props?.tabIndex, glyph?.props?.onClick]
+})(), ['svg', 'true', 'false', '0 0 14 14', undefined, undefined])
+check('the glyph sits left of the sentence, which is unchanged', [
+  findByClass(countPill, 'trellis-statusline-pill')?.children?.[0]?.props?.className,
+  findByClass(countPill, 'trellis-statusline-pill')?.children?.[1]?.props?.className,
+], ['trellis-statusline-glyph', 'trellis-statusline-count'])
+
+// A session the Host knows nothing about: no task and no count, so the cell draws nothing.
+const blankPill = await settle(60, 'session-00000000-0000-4000-8000-000000000000')
+check('no task and no count renders nothing at all', [blankPill, flatten(blankPill)], [null, ''])
 
 await rm(scratch, { recursive: true, force: true })
 

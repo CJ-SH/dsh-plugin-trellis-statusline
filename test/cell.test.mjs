@@ -32,16 +32,9 @@ const reactStub = {
   createElement: (type, props, ...children) => {
     const node = { type, props: props ?? {}, children: children.flat(Infinity) }
     // React assigns a `ref` prop to its holder during commit; the cell relies on that to tell
-    // an inside click from an outside one, and to measure itself before positioning.
+    // an inside click from an outside one.
     const ref = node.props.ref
     if (ref !== null && ref !== undefined && typeof ref === 'object') ref.current = node
-    // The overlay cell measures two of its own elements; identify them by class the way the
-    // browser would, so the test can feed it a layout.
-    node.getBoundingClientRect = () => {
-      if (node.props.className === 'trellis-statusline-hero') return layout.root
-      if (node.props.className === 'trellis-statusline-hero-slot') return layout.slot
-      return zeroRect
-    }
     return node
   },
   useState: (initial) => {
@@ -95,16 +88,10 @@ const listenerCount = () => [...documentListeners.values()].reduce((total, set) 
 const fireDocument = (type, event) => {
   for (const handler of [...(documentListeners.get(type) ?? [])]) handler(event)
 }
-// The overlay cell measures the composer before it can position itself, so the stub has to
-// answer `querySelector`, hand out rects, and expose a viewport to attach resize listeners to.
+// The dock cell positions nothing, so there is no layout to feed it — the viewport stub exists
+// only so the test can prove no resize listener is ever attached.
 const viewListeners = new Map()
 const viewListenerCount = () => [...viewListeners.values()].reduce((total, set) => total + set.size, 0)
-const fireView = (type, event) => {
-  for (const handler of [...(viewListeners.get(type) ?? [])]) handler(event)
-}
-const zeroRect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
-/** Mutable layout the test drives: the composer card's rect, and the cell's own boxes. */
-const layout = { anchor: null, root: zeroRect, slot: zeroRect }
 const viewStub = {
   addEventListener(type, handler) {
     const set = viewListeners.get(type) ?? new Set()
@@ -118,7 +105,6 @@ const viewStub = {
 globalThis.document = {
   createElement: () => ({ dataset: {}, textContent: '', remove() {} }),
   head: { append: () => undefined },
-  querySelector: () => layout.anchor,
   defaultView: viewStub,
   addEventListener(type, handler) {
     const set = documentListeners.get(type) ?? new Set()
@@ -184,9 +170,9 @@ const ctx = {
 
 exported.apply(ctx)
 const Cell = caught[0]?.component
-const HeroCell = caught[1]?.component
+const DockCell = caught[1]?.component
 check('captured the header cell', typeof Cell, 'function')
-check('captured the hero cell', typeof HeroCell, 'function')
+check('captured the dock cell', typeof DockCell, 'function')
 check('apply itself starts no interval', intervals.length, 0)
 
 // --- Hook runtime driver ------------------------------------------------------------------
@@ -463,83 +449,60 @@ check('and it holds document listeners', listenerCount(), 2)
 for (const cleanup of storeOf(Cell).cleanups) if (typeof cleanup === 'function') cleanup()
 check('unmount releases every document listener', listenerCount(), 0)
 
-// --- 15. The new-session seat (R11) --------------------------------------------------------
+// --- 15. The new-session seat: the composer's input dock (R11, moved 2026-09-20) ----------
 /**
- * A stand-in for the `useSessions` standard prop. The Hero cell is root-scoped, so it has no
- * `sessionId` prop: it reads the current session and that session's `blank` bit from the store.
+ * A stand-in for the `useSessions` standard prop. The dock cell is session-scoped (it receives
+ * `sessionId`) and reads that session's `blank` bit from the same store the shell uses to pick
+ * the Hero — `SessionListState.byId[id].blank`, which `ConversationRoot` reads as `summaryBlank`.
  */
 const sessionsWith = (blank, current = SESSION) => (selector) =>
   selector({ current, byId: current === undefined ? {} : { [current]: { blank } } })
-/** `activePanelId === null` is what `PanelInfo` uses to mean "the Conversation is displayed". */
-const panelsWith = (activePanelId = null) => (selector) => selector({ activePanelId })
-const heroProps = (blank, current = SESSION, activePanelId = null) => ({
-  useSessions: sessionsWith(blank, current),
-  usePanelInfo: panelsWith(activePanelId),
+const dockProps = (blank, sessionId = SESSION) => ({
+  sessionId,
+  ...(blank === undefined ? {} : { useSessions: sessionsWith(blank, sessionId) }),
 })
-const heroBoxOf = (tree) => findByClass(tree, 'trellis-statusline-hero')
-const heroSlotOf = (tree) => findByClass(tree, 'trellis-statusline-hero-slot')
+const dockOf = (tree) => findByClass(tree, 'trellis-statusline-dock')
 
 reply = readAs(ROOT, treeFor(ROOT.id, nestedTree))
-const beforeHero = calls.length
-const hero = await settleWith(HeroCell, heroProps(true))
-check('a blank session draws an overlay entry', heroBoxOf(hero) !== null, true)
-check('the hero pill reads the same task', flatten(hero), '[P1] Parent system · 规划中 · 父任务')
-check('the hero pill requests the current session', [calls.length - beforeHero, askedSession(calls.at(-1))], [1, SESSION])
-check('the hero pill is the same clickable shape', pillOf(hero)?.type, 'button')
+const beforeDock = calls.length
+const dock = await settleWith(DockCell, dockProps(true))
+check('a blank session draws the dock row', dockOf(dock) !== null, true)
+check('the dock pill reads the same task', flatten(dock), '[P1] Parent system · 规划中 · 父任务')
+check('the dock pill requests this session', [calls.length - beforeDock, askedSession(calls.at(-1))], [1, SESSION])
+check('the dock pill is the same clickable shape', pillOf(dock)?.type, 'button')
+// The point of the move: a flow row is laid out by the composer, so nothing is measured and no
+// listener is attached — the collision the measured overlay entry had cannot happen here.
+check('the dock row measures nothing and listens to nothing', viewListenerCount(), 0)
 
-// Unmeasurable layout (no composer yet) must not draw a pill at a wrong place.
-check('the pill stays hidden until the composer can be measured', heroSlotOf(hero)?.props?.style, {
-  visibility: 'hidden',
-})
-
-// With a layout, re-measuring (what the ResizeObserver or a viewport resize triggers) settles
-// it centred just under the composer card, in the overlay's coordinates.
-layout.anchor = { children: [], getBoundingClientRect: () => ({ left: 300, top: 400, right: 900, bottom: 520, width: 600, height: 120 }) }
-layout.root = { left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800 }
-layout.slot = { left: 0, top: 0, right: 0, bottom: 0, width: 200, height: 22 }
-const remeasured = await settleWith(HeroCell, heroProps(true))
-check('re-measuring alone does not place the pill', heroSlotOf(remeasured)?.props?.style, { visibility: 'hidden' })
-fireView('resize', {})
-const placed = await settleWith(HeroCell, heroProps(true))
-check('the pill lands centred under the card', heroSlotOf(placed)?.props?.style, {
-  // 300 + 600/2 - 0 - 200/2 = 500; 520 - 0 padding + 6 gap - 0 = 526
-  left: '500px',
-  top: '526px',
-})
-check('the hero cell watches the viewport for re-measurement', viewListenerCount(), 1)
-
-const heroOpen = await (async () => {
-  pillOf(placed).props.onClick()
-  return settleWith(HeroCell, heroProps(true))
+const dockOpen = await (async () => {
+  pillOf(dock).props.onClick()
+  return settleWith(DockCell, dockProps(true))
 })()
-check('the hero dropdown opens', menuOf(heroOpen) !== null, true)
-check('no seat needs a dropdown-direction flag', findByClass(menuOf(heroOpen), 'trellis-statusline-menu')?.props?.['data-placement'], undefined)
+check('the dock dropdown opens', menuOf(dockOpen) !== null, true)
+check('no seat needs a dropdown-direction flag', findByClass(menuOf(dockOpen), 'trellis-statusline-menu')?.props?.['data-placement'], undefined)
 
-// AC13: an ordinary conversation must not grow a second pill — and must not pay for one.
-for (const cleanup of storeOf(HeroCell).cleanups) if (typeof cleanup === 'function') cleanup()
-check('unmount releases the viewport listener', viewListenerCount(), 0)
+// The workspace-count reply renders in the dock too — the reason this seat grew a pill at all.
+// A different session id is what re-triggers the request: the hook re-fetches only on a change.
+reply = { ok: true, value: { status: 'workspace', activeTasks: 3 } }
+const dockCount = await settleWith(DockCell, dockProps(true, OTHER))
+check('the dock renders the workspace count', flatten(dockCount), '工作区 3 个活动任务')
+// Same rule as the header form: the glyph is decoration, the pill stays a span with no tab stop.
+check('the dock count pill is a span carrying one hidden glyph', (() => {
+  const glyph = findByClass(dockCount, 'trellis-statusline-glyph')
+  return [pillOf(dockCount)?.type, pillOf(dockCount)?.props?.tabIndex, glyph?.type, glyph?.props?.['aria-hidden']]
+})(), ['span', undefined, 'svg', 'true'])
+reply = readAs(ROOT, treeFor(ROOT.id, nestedTree))
+
+// An ordinary conversation already carries the header pill: this one must stay empty — and free.
 const beforeQuiet = calls.length
 const intervalsBefore = intervals.length
-const hidden = await settleWith(HeroCell, heroProps(false))
-check('a non-blank session renders nothing', hidden, null)
+check('a non-blank session renders nothing', await settleWith(DockCell, dockProps(false)), null)
 check('and makes no request while hidden', [calls.length - beforeQuiet, intervals.length - intervalsBefore], [0, 0])
 
-// AC14: no session at all, and a list state that does not know this session yet.
-check('no session renders nothing', await settleWith(HeroCell, heroProps(undefined, undefined)), null)
-check('an unknown session renders nothing', await settleWith(HeroCell, heroProps(undefined, OTHER)), null)
-// The overlay is frame-wide: a blank session stays blank while another panel is on screen, so
-// the pill must not float over Settings.
-check('another main panel renders nothing', await settleWith(HeroCell, heroProps(true, SESSION, 'settings')), null)
-check(
-  'a seat without useSessions degrades instead of throwing',
-  await settleWith(HeroCell, {}),
-  null,
-)
-check(
-  'a seat without usePanelInfo will not guess that the conversation is showing',
-  await settleWith(HeroCell, { useSessions: sessionsWith(true) }),
-  null,
-)
+// Fail-closed edges: no session id, a list state that does not know this session, no store at all.
+check('no sessionId renders nothing', await settleWith(DockCell, { useSessions: sessionsWith(true, undefined) }), null)
+check('a list state without this session renders nothing', await settleWith(DockCell, dockProps(undefined)), null)
+check('a seat without useSessions degrades instead of throwing', await settleWith(DockCell, { sessionId: SESSION }), null)
 
 const failed = results.filter((entry) => !entry.ok)
 for (const entry of results) {

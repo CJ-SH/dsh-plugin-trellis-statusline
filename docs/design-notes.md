@@ -19,11 +19,14 @@ sessionId
   └─ cwd        ctx.sessions.get(id).header.cwd          (live session)
                 ctx.workspaceRegistry.list()             (persisted session, canonical-cwd index)
   └─ pointer    <cwd>/.trellis/.runtime/sessions/dsh_<sessionId>.json  → current_task
+  └─ count      <cwd>/.trellis/tasks/<dir>/task.json            → how many tasks there are
   └─ nothing
 ```
 
-The pointer is the **only** evidence. There is no workspace scan behind it, by decision — see
-[Why the workspace scan was removed](#why-the-workspace-scan-was-removed-2026-09-17).
+The pointer is the **only** source of a **task title**; there is no workspace scan behind it, by
+decision — see [Why the workspace scan was removed](#why-the-workspace-scan-was-removed-2026-09-17).
+A session the pointer does not name gets the workspace's activity **count** instead, never a title —
+see [The workspace count](#the-workspace-count-2026-09-20).
 
 Both cwd sources are synchronous, and both were confirmed in a live dsh process: for the same
 session they returned the same workspace path. The registry matters because it also covers
@@ -52,9 +55,9 @@ plugin now does the same:
 | Workspace state | Before | Now |
 |---|---|---|
 | a pointer naming a real task | that task | unchanged |
-| pointer missing, other sessions' work present | the newest started running task (usually not this session's) | nothing |
-| `trellis init` scaffolding only | nothing (the `branch` rule) | nothing |
-| pointer stale / escaping / naming a corrupt file | the scan's best guess | nothing |
+| pointer missing, other sessions' work present | the newest started running task (usually not this session's) | the workspace **count** |
+| `trellis init` scaffolding only | nothing (the `branch` rule) | nothing (the count is 0) |
+| pointer stale / escaping / naming a corrupt file | the scan's best guess | the workspace **count** |
 
 The alternatives to the scan were rejected on purpose: reading the live session's event stream or
 decoding the session log are heuristics over dsh internals, they only work within one process
@@ -64,6 +67,35 @@ lifetime, and they read conversation content. The pointer is the one trustworthy
 `tasks/archive` is skipped explicitly, mirroring `task_store.py`'s own
 `candidate.name == DIR_ARCHIVE` check rather than relying on archived tasks happening to live a
 directory deeper.
+
+### The workspace count (2026-09-20)
+
+A pill that shows nothing at all in a brand-new session turned out to be its own failure mode: the
+workspace's work is invisible exactly where a user starts looking. The fix keeps the title rule and
+adds the one thing a title-less session can honestly say — how many tasks the workspace holds
+(decision D1 = A in task `09-20-new-session-workspace-task`):
+
+- the reply grows a third shape, `{ status: 'workspace', activeTasks }`, which by construction
+  carries **no** `task`/`title` field — that is what makes "another session's task shown as mine"
+  impossible rather than merely unlikely;
+- the count is the same number Claude Code's statusline prints as `N task(s)`; its
+  `_count_active_tasks` (`.claude/hooks/statusline.py`) counts every non-`archive` directory that
+  holds a `task.json`;
+- two deliberate differences: this count requires that file to parse and carry a status, and it
+  subtracts `trellis init`'s scaffolding task (`00-bootstrap-guidelines`, never started) — counted
+  work should be work someone is doing. A task carrying the scaffold's name but *with* a recorded
+  `branch` is real work and stays counted, so the rule cannot hide an in-progress task;
+- `0` is not a count: it degrades to the old `none` reply and the cell draws nothing;
+- the pill **leads with a glyph** (R6, user instruction 2026-09-20): an inline 14×14 list-checks svg on
+  the platform's figma artboard (`stroke:currentColor`, `aria-hidden`, `focusable="false"`, fixed 14×14
+  `flex:none` box). It is decoration: no handler, no tab stop, so the "not clickable, not a title"
+  contract is intact. The sibling `ollama-usage` pill solves the same slot with a CSS dot
+  (`14px` grid + `7px` `border-radius:50%` `i`); a dot was rejected here because a bare dot reads as a
+  status light rather than as "tasks", while the stroke glyph carries the meaning and matches the
+  official status glyphs' icon language.
+
+Claude Code's statusline itself never names a task it does not own — a fresh session there shows
+only the count — which is why this shape is the one the option list settled on.
 
 ---
 
@@ -124,7 +156,7 @@ them apart.
 | Seat | When it shows | How it is placed |
 |---|---|---|
 | `conversation.session.header.actions` (id `trellis-statusline`, order 10) | an ordinary session | the header's title-adjacent action, laid out by the shell |
-| `shell.overlay` (id `trellis-statusline-hero`, order 1) | a **blank** session — the new-session view | measured and drawn centred just below the composer card |
+| `conversation.input.dock` (id `trellis-statusline-dock`, order 30) | a **blank** session — the new-session view | a flow row of the composer stack, directly above the input card |
 
 ### Trap 1: the header is hidden, not unmounted
 
@@ -139,69 +171,68 @@ header is showing, forever. Read the flag the shell itself reads:
 useSessions((s) => s.byId[sessionId]?.blank)     // ConversationRoot's `summaryBlank`
 ```
 
-A root-scoped seat has no `sessionId` prop, so it takes it from the same store
-(`useSessions((s) => s.current)`). Each selector must return a **primitive**: one that builds a
-fresh object defeats the store's reference comparison on every read.
-
-Because the overlay is frame-wide, `blank` alone is not enough — a blank session stays blank while
-Settings is open, and the pill would float over it. The second condition is
-`usePanelInfo((s) => s.activePanelId) === null`, which is how `PanelInfo` spells "the Conversation
-is displayed".
+Each selector must return a **primitive**: one that builds a fresh object defeats the store's
+reference comparison on every read.
 
 ### Trap 2: read the render site, not the slot catalog
 
 `conversation.composer.dock` is described in the slot catalog as "Ambient entries below the
 composer card" — which reads as exactly the seat for a status line under the input. Its render
 site gates it on `variant === "composer"`, and the Hero sets `variant === "hero"`, so it **never
-renders there**. An implementation that trusts the description ships a feature that silently does
-nothing. `conversation.input.dock` renders in both (gated only on `input`/`sessionId`).
+renders there** (`dsh-client-ui-conversation/lib/client.js:16259`). An implementation that trusts
+the description ships a feature that silently does nothing.
 
-The other candidates, for the record: `conversation.input.left`/`right` are inside the card;
-`conversation.input.overlay` is an absolute anchor, not a row; and `conversation.composer.bar`,
-`conversation.hero.brand.mark`, `conversation.hero.workspace` and `conversation.hero.agentPreset`
-are `single` seats, so occupying them replaces shipped UI.
+`conversation.input.dock` renders in both states (gated only on `input`/`sessionId`), which is why
+the pill lives there — above the card rather than below it. The other candidates, for the record:
+`conversation.input.left`/`right` are inside the card; `conversation.input.overlay` is an absolute
+anchor, not a row; and `conversation.composer.bar`, `conversation.hero.brand.mark`,
+`conversation.hero.workspace` and `conversation.hero.agentPreset` are `single` seats, so
+occupying them replaces shipped UI.
 
-### Why the Hero pill is measured
+### Why the seat left `shell.overlay` (2026-09-20)
 
-The Hero's composer stack ends with the card:
+The first version drew the new-session pill in the frame-wide `shell.overlay`, positioned by
+measuring the composer card. It worked, but that layer is shared and **unmanaged**: the sibling
+`dsh-plugin-ollama-usage` anchors its own hero pill there, and the two landed 13px apart — our gap
+6 against its gap 8 plus a half-height offset — so they overlapped by ~40 % of a pill's height
+instead of stacking. Nothing in the shell arranges overlay entries: `dsh-client-ui-layout` renders
+them into a plain `overlayLayer` div and every cell owns its own coordinates. Coexistence would
+have to be negotiated between plugins, or designed out.
 
+It was designed out. A flow row cannot collide with anything, and the seat is conversation-scoped
+by construction, so the old "do not float over Settings" `activePanelId` check is gone with it.
+The cost is the position: above the card instead of below it.
+
+### One line, not two (2026-09-20, later the same day)
+
+Both surfaces moved into `conversation.input.dock`, and that seat's contract is "full-width
+entries above the composer card" — each entry is a direct child of the composer's **column** stack,
+because the seat anchor renders `<div data-slot="conversation.input.dock" style="display:contents">`
+and a `list` seat's entries are a Fragment inside it. Two compact pills therefore landed on two
+rows.
+
+To share one line the anchor itself has to become the row:
+
+```css
+[data-slot="conversation.input.dock"]{display:flex !important;flex-flow:row wrap;justify-content:center;align-items:center;gap:var(--dsh-composer-stack-gap,6px)}
 ```
-composerStack            gap:8px; padding-bottom:32px; align-self:center
-  ├─ HeroShell
-  ├─ heroWorkspaceRow    (above the card)
-  ├─ conversation.input.dock
-  └─ inputBar = renderSlot("conversation.composer.bar")   ← the card is the last child
-```
 
-Nothing additive sits below the card, so the position has to be produced by measurement. The
-technique is borrowed from the sibling `dsh-plugin-ollama-usage` (an unpublished companion plugin
-in the same workspace, so the reference is provenance rather than a dependency):
+- **`!important` is not optional**: the shell sets `display:contents` *inline*, and an inline
+  declaration beats any author rule that is not `!important`.
+- It is safe for the seat's shipped occupants because they are full-width
+  (`width:calc(100% - …)`): a full-width item wraps onto a line of its own, so the queue, todo and
+  goal panels are unchanged, and the gap keeps the stack's own spacing variable.
+- Both plugins inject this identical rule, so either one alone still lays out sensibly.
 
-- anchor with the **slot protocol's own marker**,
-  `document.querySelector('[data-slot="conversation.composer.bar"]')`, never a product CSS class;
-- a **zero-sized rect means a `display:contents` wrapper**, so keep descending a bounded depth
-  instead of concluding "not found";
-- measure relative to your own box — the overlay layer's origin is not the viewport;
-- subtract the anchor's computed `padding-bottom` so the pill lands under the card's visible edge,
-  not under a transparent band;
-- centres on the card, which is that region's native alignment (the shipped ambient row under the
-  composer is `align-items:center`);
-- re-measure from a `ResizeObserver` on your parent and on the anchor, plus a viewport `resize`
-  listener, and release them together.
+### Traps that remain, for whoever touches this next
 
-**If the composer cannot be measured, nothing is drawn.** A reshaped composer should cost the Hero
-pill, not misplace it.
-
-One trap inside the trap: the wrapper cannot be measured before it exists, and its data arrives a
-render later. An effect keyed only on "should this show" measures nothing on the first pass and
-never tries again — the surface then stays hidden forever. Include "is there anything to draw" in
-the dependencies.
-
-### Click-through
-
-`shell.overlay` is a click-through layer, so the entry keeps `pointer-events:none` and only the
-child that draws opts back in with `pointer-events:auto`. A full-frame box there would swallow
-every click in the application.
+- **A blank bit is not an enable flag.** `useTaskPill(…, enabled)` stops polling without clearing
+  its state, and the composer dock stays mounted when a blank session becomes active. Check the
+  blank bit in the render path too, or a stale pill will sit beside the header pill the moment the
+  first message is sent. `test/cell.test.mjs` pins exactly this.
+- **The cell is session-scoped** — `sessionId` arrives from the standard kit, exactly as it does
+  for the header seat — and it must **fail closed**: no `useSessions`, or a list state that does
+  not know this session, means "draw nothing". A duplicate pill is worse than a missing one.
 
 ---
 

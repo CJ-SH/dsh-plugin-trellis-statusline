@@ -110,7 +110,7 @@ exported.apply(ctx)
 
 check('claims the two seats, header first', injected, [
   'conversation.session.header.actions',
-  'shell.overlay',
+  'conversation.input.dock',
 ])
 check('registered two entries', registrations.length, 2)
 
@@ -122,12 +122,14 @@ check('header seat: cell id', header.id, 'trellis-statusline')
 check('header seat: order sits between the preset selector and the jobs counter', header.order, 10)
 check('header seat: locale namespace matches the registered one', header.locale, dictionaries[0]?.ns)
 
-const hero = bySlot['shell.overlay'].options
-check('hero seat: slot name is the seat key', hero.name, 'shell.overlay')
-check('hero seat: cell id', hero.id, 'trellis-statusline-hero')
-// The overlay's shipped occupant is `ollama-cloud-model-picker` at order 100.
-check('hero seat: order leads the overlay group', hero.order, 1)
-check('hero seat: shares the header cell locale namespace', hero.locale, dictionaries[0]?.ns)
+const dock = bySlot['conversation.input.dock'].options
+check('hero seat: slot name is the seat key', dock.name, 'conversation.input.dock')
+check('hero seat: cell id', dock.id, 'trellis-statusline-dock')
+// The composer's own queue row is `queue` at order 20; our pill is ambient and follows it.
+check('hero seat: order follows the composer queue row', dock.order, 30)
+check('hero seat: shares the header cell locale namespace', dock.locale, dictionaries[0]?.ns)
+// The overlay is no longer used: a flow row cannot fight the sibling usage plugin's overlay pill.
+check('the measured overlay seat is gone', bySlot['shell.overlay'], undefined)
 
 check('both seats registered a component', registrations.map((item) => typeof item.component), ['function', 'function'])
 check('the two seats are different components', registrations[0].component === registrations[1].component, false)
@@ -151,6 +153,10 @@ check('the state words are the ones the pill shows', [
   dictionaries[0].dicts.zh['state.planning'],
   dictionaries[0].dicts.zh['state.review'],
 ], ['进行中', '规划中', '审核中'])
+check('the workspace count sentence is translated with its {n} placeholder', [
+  dictionaries[0].dicts.zh['workspace.count'],
+  dictionaries[0].dicts.en['workspace.count'],
+], ['工作区 {n} 个活动任务', '{n} active task(s) in workspace'])
 
 // --- Stylesheet lifecycle ----------------------------------------------------------------
 check('stylesheet injected once', styleTags.length, 1)
@@ -169,10 +175,31 @@ check('stylesheet carries the dropdown and the tree indent', [
 ], [true, true, true])
 check('the chevron is drawn, not typed as a glyph', /\.trellis-statusline-chevron\{[^}]*border-right/.test(styleTags[0].textContent), true)
 // The overlay layer is click-through: the entry must not swallow clicks around the pill.
-check('the overlay entry is click-through except for its slot', [
-  /\.trellis-statusline-hero\{[^}]*pointer-events:none/.test(styleTags[0].textContent),
-  /\.trellis-statusline-hero-slot\{[^}]*pointer-events:auto/.test(styleTags[0].textContent),
+check('the count pill has its own rule', styleTags[0].textContent.includes('.trellis-statusline-count{'), true)
+check('the count glyph is fixed-size decoration that inherits the pill colour', [
+  /\.trellis-statusline-glyph\{[^}]*flex:none/.test(styleTags[0].textContent),
+  /\.trellis-statusline-glyph\{[^}]*width:14px/.test(styleTags[0].textContent),
+  /\.trellis-statusline-glyph\{[^}]*color:currentColor/.test(styleTags[0].textContent),
+], [true, true, true])
+// The pill takes its size from the wrapper (`font:inherit`), so both shapes must sit inside it.
+check('the wrapper pins the pill font and the pill inherits it', [
+  /\.trellis-statusline\{[^}]*font-size:12px/.test(styleTags[0].textContent),
+  /\.trellis-statusline-pill\{[^}]*font:inherit/.test(styleTags[0].textContent),
 ], [true, true])
+// The row is content-sized inside the composer's dock line: no coordinates, no full-width row.
+check('the dock row is content-sized and free of coordinates', [
+  /\.trellis-statusline-dock\{[^}]*display:inline-flex/.test(styleTags[0].textContent),
+  /\.trellis-statusline-dock\{[^}]*width:100%/.test(styleTags[0].textContent),
+  /position:absolute/.test(styleTags[0].textContent.match(/\.trellis-statusline-dock\{[^}]*\}/)?.[0] ?? '.trellis-statusline-dock{}'),
+], [true, false, false])
+// The seat anchor is `display:contents` inline, so sharing one line with the sibling usage pill
+// takes an `!important` override of the anchor itself; the seat's own full-width occupants
+// (queue/todo/goal) still wrap onto a line of their own.
+check('the seat anchor becomes the shared wrapping row', [
+  /\[data-slot="conversation\.input\.dock"\]\{[^}]*display:flex !important/.test(styleTags[0].textContent),
+  /\[data-slot="conversation\.input\.dock"\]\{[^}]*flex-flow:row wrap/.test(styleTags[0].textContent),
+  /\[data-slot="conversation\.input\.dock"\]\{[^}]*justify-content:center/.test(styleTags[0].textContent),
+], [true, true, true])
 
 const sheet = effects.find((item) => String(item.label).includes('stylesheet'))
 check('stylesheet disposer removes the tag', (() => {

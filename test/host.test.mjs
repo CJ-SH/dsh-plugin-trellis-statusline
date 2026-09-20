@@ -197,16 +197,20 @@ check('an unknown session does not borrow another session\'s workspace', await (
   return reply
 })(), { ok: true, value: { status: 'none' } })
 
-// --- The session pointer is the only evidence (prd.md AC-S1, D1=(a)) ----------------------
+// --- The session pointer is the only source of a title (prd.md R1-R2, D1 = A) -------------
 const wsPointer = await makeWorkspace('pointer')
 pointAt(wsPointer)
-// A running, started task with no pointer for *this* session says nothing about this session.
-// Before D1=(a) the workspace scan reported it anyway — the false positive this task removes.
+// A running, started task that no pointer names is not this session's task, so it is never
+// named. Since D1 = A the reply carries the workspace's activity count instead — and no title.
 await writeTask(wsPointer, '09-16-newer', taskJson('Newer in-progress task', 'in_progress', 'P1'))
-check('a started running task is not reported without a session pointer', await read(SESSION), {
+check('no pointer means no title, only the workspace count', await read(SESSION), {
   ok: true,
-  value: { status: 'none' },
+  value: { status: 'workspace', activeTasks: 1 },
 })
+check('the count reply carries no task fields at all', Object.keys((await read(SESSION)).value).sort(), [
+  'activeTasks',
+  'status',
+])
 
 // A pointer is direct evidence that this session started the task, so what it names is shown
 // unfiltered: even a never-started (`branch: null`) planning task beats every heuristic the
@@ -220,15 +224,25 @@ check('an explicit session pointer names the task', (await read(SESSION)).value.
   priority: 'P3',
 })
 
-// A pointer that names something unusable is still no evidence: none, never a guess at the
-// workspace's newest running task.
+// A pointer that names something unusable is still no evidence about *this* session: it falls
+// back to the workspace count, never to a guess at which task this session might be on.
+// `wsPointer` now holds two tasks: 09-16-newer (in_progress) and 09-15-older (planning).
 await writePointer(wsPointer, SESSION, '.trellis/tasks/does-not-exist')
-check('a stale pointer is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
+check('a stale pointer falls back to the workspace count', await read(SESSION), {
+  ok: true,
+  value: { status: 'workspace', activeTasks: 2 },
+})
 await writePointer(wsPointer, SESSION, '../../../../etc/passwd')
-check('a pointer escaping .trellis is refused', await read(SESSION), { ok: true, value: { status: 'none' } })
+check('a pointer escaping .trellis is refused', await read(SESSION), {
+  ok: true,
+  value: { status: 'workspace', activeTasks: 2 },
+})
 await writePointer(wsPointer, SESSION, '.trellis/tasks/09-16-newer')
 await writeFile(join(wsPointer, '.trellis', 'tasks', '09-16-newer', 'task.json'), '{ not json')
-check('a corrupt pointed-at task.json is an empty state', await read(SESSION), { ok: true, value: { status: 'none' } })
+check('a corrupt pointed-at task.json is not counted either', await read(SESSION), {
+  ok: true,
+  value: { status: 'workspace', activeTasks: 1 },
+})
 
 // --- The task tree (design.md §3.3, R6-R9) -----------------------------------------------
 // Every case from the §3.5 table, driven through the real handler against real files.
@@ -377,12 +391,19 @@ const scaffold = {
   notes: 'First-time setup task created by trellis init (fullstack project)',
 }
 await writeTask(wsScaffold, '00-bootstrap-guidelines', scaffold)
-check('a never-started scaffolding task is not reported', await read(SESSION), { ok: true, value: { status: 'none' } })
+check('a never-started scaffolding task is neither named nor counted', await read(SESSION), {
+  ok: true,
+  value: { status: 'none' },
+})
 
-// The same file, differing only in the one field `task.py start` writes: started, and still
-// not this session's task.
+// The same file, differing only in the one field `task.py start` writes: started. It is still
+// not this session's task, so it is never named — but a *started* task is real work, so it is
+// counted. The scaffold rule exists to hide a never-started artefact, not to hide work.
 await writeTask(wsScaffold, '00-bootstrap-guidelines', { ...scaffold, branch: 'master' })
-check('a started task is still not this session\'s task', await read(SESSION), { ok: true, value: { status: 'none' } })
+check('a started task named like the scaffold is still counted', await read(SESSION), {
+  ok: true,
+  value: { status: 'workspace', activeTasks: 1 },
+})
 
 // The pointer is the one thing that reports it — status and branch stay irrelevant.
 await writePointer(wsScaffold, SESSION, '.trellis/tasks/00-bootstrap-guidelines')
@@ -392,6 +413,24 @@ check('a pointer reports the scaffolding task it names', (await read(SESSION)).v
   status: 'in_progress',
   priority: 'P1',
 })
+
+// --- The count itself (prd.md R2/R3) -----------------------------------------------------
+const wsCount = await makeWorkspace('count')
+pointAt(wsCount)
+await writeTask(wsCount, '09-15-first', taskJson('First planning task', 'planning', 'P2'))
+await writeTask(wsCount, '09-16-second', taskJson('Second started task', 'in_progress', 'P1'))
+await writeTask(wsCount, '09-17-third', taskJson('Third completed task', 'completed', 'P3'))
+// A directory named `archive` is Trellis' park-and-forget month bucket, whatever is inside it.
+await writeTask(wsCount, 'archive', taskJson('Parked task', 'in_progress', 'P1'))
+check('every non-archived task counts, whatever its status', (await read(SESSION)).value.activeTasks, 3)
+await writeTask(wsCount, '00-bootstrap-guidelines', {
+  id: '00-bootstrap-guidelines',
+  name: '00-bootstrap-guidelines',
+  title: 'Bootstrap Guidelines',
+  status: 'in_progress',
+  branch: null,
+})
+check('the scaffold is subtracted from that count', (await read(SESSION)).value.activeTasks, 3)
 
 // Trellis' own walk skips the `archive` directory (`task_store.py`: `candidate.name ==
 // DIR_ARCHIVE`), and so does the tree: a hand-moved child parked under `tasks/archive/` is not
