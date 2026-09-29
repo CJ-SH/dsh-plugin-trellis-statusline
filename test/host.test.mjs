@@ -25,10 +25,14 @@ const check = (label, actual, expected) => {
 const SESSION = 'session-66d44746-abbf-4a3d-bd21-a9374eae2bd1'
 const OTHER_SESSION = 'session-3724610a-d67b-4d50-97ab-e7856427ab12'
 
+/** The two exact routes this half owns: the pill's, and the status surface another bundle reads. */
+const PILL_PATH = '/trellis-statusline/task/read'
+const STATUS_PATH = '/trellis-statusline/status/read'
+
 // --- Fake cordis context ----------------------------------------------------------------
 let liveSessions = {}
 let workspaces = []
-const seen = { route: null, handler: null, disposed: false }
+const seen = { routes: new Map(), disposed: 0 }
 
 const services = {
   sessions: { get: (id) => liveSessions[id] },
@@ -37,10 +41,9 @@ const services = {
   connection: { requestRejection: () => undefined },
   webServer: {
     register(route) {
-      seen.route = route
-      seen.handler = route.handler
+      seen.routes.set(route.path, route)
       return () => {
-        seen.disposed = true
+        seen.disposed += 1
       }
     },
   },
@@ -81,21 +84,37 @@ const parseBody = (body) => {
 }
 
 /**
- * One request through the registered route handler.
+ * One request through one registered route handler.
  *
  * @param options.sessionId - query value; `undefined` omits the parameter entirely.
  * @param options.method - HTTP method, `GET` unless the case is about the method.
  * @param options.rejection - what the composition's fence answers for this one call.
+ * @param options.at - the route path to drive, the pill's by default.
  * @returns the status, the headers, the raw body and the parsed envelope.
  */
-async function callRoute({ sessionId, method = 'GET', rejection } = {}) {
+async function callRoute({ sessionId, method = 'GET', rejection, at = PILL_PATH } = {}) {
   const previous = services.connection.requestRejection
   if (rejection !== undefined) services.connection.requestRejection = rejection
   const res = makeRes()
   const query = sessionId === undefined ? '' : `?sessionId=${encodeURIComponent(sessionId)}`
-  await seen.handler({ method, url: `/trellis-statusline/task/read${query}`, headers: {} }, res)
+  const handler = seen.routes.get(at)?.handler
+  // A missing route must fail loudly here rather than throw a TypeError two frames down: this
+  // harness exists to say *what* is wrong when a route moves.
+  if (handler === undefined) throw new Error(`no route is registered at ${at}`)
+  await handler({ method, url: `${at}${query}`, headers: {} }, res)
   services.connection.requestRejection = previous
   return { status: res.status, headers: res.headers, body: res.body, parsed: parseBody(res.body) }
+}
+
+/** Run one call with the composition's fence seam missing entirely, then put it back. */
+async function withoutFence(run) {
+  const fence = services.connection.requestRejection
+  delete services.connection.requestRejection
+  try {
+    return await run()
+  } finally {
+    services.connection.requestRejection = fence
+  }
 }
 
 /** The envelope of one read: the shape every task assertion below consumes. */
@@ -143,12 +162,15 @@ const pointAt = (cwd) => {
 // --- Packaging contract -----------------------------------------------------------------
 check('plugin name is the package name', name, packageJson.name)
 check('inject declares the three required services', inject, ['sessions', 'connection', 'webServer'])
-check('the route is registered at the plugin path', [seen.route?.kind, seen.route?.path], ['exact', '/trellis-statusline/task/read'])
+check('the pill route is registered at the plugin path', (() => {
+  const route = seen.routes.get(PILL_PATH)
+  return [route?.kind, route?.path]
+})(), ['exact', PILL_PATH])
 check('the route registration is wrapped in an effect', typeof effects[0]?.disposer, 'function')
 
 // A row that throws in `apply` fails the whole plugin tree, so a route that cannot register
-// (a duplicate (kind, path) is the one way `register` throws) must degrade to "one UI surface
-// fewer" instead of blocking the boot.
+// (a duplicate (kind, path) is the one way `register` throws) must degrade to "one surface
+// fewer" instead of blocking the boot — and each route must degrade on its own.
 const logged = []
 const originalError = console.error
 console.error = (message) => logged.push(String(message))
@@ -158,7 +180,7 @@ const throwingCtx = {
   connection: { requestRejection: () => undefined },
   webServer: {
     register() {
-      throw new Error('duplicate route /trellis-statusline/task/read')
+      throw new Error('duplicate route')
     },
   },
 }
@@ -170,8 +192,37 @@ try {
 }
 console.error = originalError
 check('apply survives an unavailable route', survived, true)
-check('the degradation is logged once', logged.length, 1)
+check('each route degrades on its own, and each degradation is logged', logged.length, 2)
 check('the log names the plugin', logged[0]?.startsWith('[trellis-statusline]'), true)
+
+// The realistic collision: one path is already taken, the other is not. The surviving route is
+// the load-bearing assertion — a shared guard would silently drop both.
+const partlyLogged = []
+console.error = (message) => partlyLogged.push(String(message))
+const partialRoutes = new Map()
+let partialSurvived = true
+try {
+  apply({
+    get: () => undefined,
+    effect: (callback) => callback(),
+    connection: { requestRejection: () => undefined },
+    webServer: {
+      register(route) {
+        if (route.path === STATUS_PATH) throw new Error(`duplicate route ${route.path}`)
+        partialRoutes.set(route.path, route)
+        return () => undefined
+      },
+    },
+  })
+} catch {
+  partialSurvived = false
+}
+console.error = originalError
+check('a collision on one route leaves the other registered', [partialSurvived, [...partialRoutes.keys()]], [
+  true,
+  [PILL_PATH],
+])
+check('only the colliding route is reported', partlyLogged.length, 1)
 
 // --- cwd resolution (design.md §2.1, conclusions A and B) --------------------------------
 // The cwd is observable *through* the pointer: the pointer file only exists under the cwd this
@@ -483,10 +534,7 @@ check('a long title is truncated to 48 characters', [long.length, long.endsWith(
 // --- Protocol: fence first, then the method, then the query ------------------------------
 const fenced = await callRoute({ sessionId: SESSION, rejection: () => 401 })
 const forbidden = await callRoute({ sessionId: SESSION, rejection: () => 403 })
-const fence = services.connection.requestRejection
-delete services.connection.requestRejection
-const fenceless = await callRoute({ sessionId: SESSION })
-services.connection.requestRejection = fence
+const fenceless = await withoutFence(() => callRoute({ sessionId: SESSION }))
 const realGet = services.sessions.get
 let touched = false
 services.sessions.get = () => {
@@ -513,6 +561,96 @@ check('a good read is 200 JSON in the client envelope', [
   answered.parsed.ok,
 ], [200, 'application/json; charset=utf-8', true])
 check('the answer is never cached', answered.headers['cache-control'], 'no-store')
+
+// --- The status surface (design.md §2.4): what another bundle reads -----------------------
+// The management hub's status row asks one question — is this session on a Trellis task — and
+// must be able to ask it without importing this package. The answer runs the *same* chain the
+// pill runs and drops everything the pill needs and a status row must not have: no title, no
+// tree, no priority. A second implementation of "which task is this session on" is exactly what
+// would drift, so the agreement between the two surfaces is asserted, not assumed.
+const wsStatus = await makeWorkspace('status')
+pointAt(wsStatus)
+await writeTask(wsStatus, '09-29-hub', taskJson('Hub status surface', 'in_progress', 'P1'))
+await writePointer(wsStatus, SESSION, '.trellis/tasks/09-29-hub')
+
+/** The status surface's envelope, driven through its own registered handler. */
+const statusOf = (options = {}) => callRoute({ ...options, at: STATUS_PATH }).then((answer) => answer.parsed)
+
+const statusRoute = seen.routes.get(STATUS_PATH)
+check('the status route is registered at its own exact path', [statusRoute?.kind, statusRoute?.path], [
+  'exact',
+  STATUS_PATH,
+])
+check('each route got its own effect', effects.map((item) => typeof item.disposer), ['function', 'function'])
+check('the status surface reports the session verdict', await statusOf({ sessionId: SESSION }), {
+  ok: true,
+  value: {
+    plugin: packageJson.name,
+    status: 'ok',
+    active: true,
+    taskId: '09-29-hub',
+    taskStatus: 'in_progress',
+  },
+})
+check('the status value is the whole documented key set', Object.keys((await statusOf({ sessionId: SESSION })).value).sort(), [
+  'active',
+  'plugin',
+  'status',
+  'taskId',
+  'taskStatus',
+])
+// The structural guarantee, asserted on the bytes rather than on the shape: the pill's reply
+// carries the title, and this one must not be able to — a future field would fail here.
+check(
+  'no title can travel on the status surface',
+  JSON.stringify(await statusOf({ sessionId: SESSION })).includes('Hub status surface'),
+  false,
+)
+check('both surfaces agree about the session', [
+  (await statusOf({ sessionId: SESSION })).value.active,
+  (await read(SESSION)).value.status,
+], [true, 'ok'])
+
+await writePointer(wsStatus, SESSION, '.trellis/tasks/does-not-exist')
+check('a session without a pointer reports the workspace count and no task', await statusOf({ sessionId: SESSION }), {
+  ok: true,
+  value: { plugin: packageJson.name, status: 'workspace', active: false, activeTasks: 1 },
+})
+check('both surfaces agree about a pointer-less session', [
+  (await statusOf({ sessionId: SESSION })).value.activeTasks,
+  (await read(SESSION)).value.activeTasks,
+], [1, 1])
+
+pointAt(join(scratch, 'no-trellis-at-all'))
+check('a session outside any workspace reports nothing to show', await statusOf({ sessionId: SESSION }), {
+  ok: true,
+  value: { plugin: packageJson.name, status: 'none', active: false },
+})
+check('an unknown session is a verdict, not an error', [
+  (await callRoute({ sessionId: OTHER_SESSION, at: STATUS_PATH })).status,
+  (await statusOf({ sessionId: OTHER_SESSION })).value.status,
+], [200, 'none'])
+
+// A Settings page has no session to report on. That is a legitimate question with an honest
+// answer — and the answer still proves this plugin is mounted, which is the hub's other need.
+check('a session-less question is answered, not refused', await statusOf(), {
+  ok: true,
+  value: { plugin: packageJson.name, status: 'unscoped' },
+})
+check('an unscoped answer carries no `active` at all', 'active' in (await statusOf()).value, false)
+check('a blank sessionId is still unscoped rather than an error', [
+  (await callRoute({ sessionId: '   ', at: STATUS_PATH })).status,
+  (await statusOf({ sessionId: '   ' })).value.status,
+], [200, 'unscoped'])
+check('an oversized sessionId is refused on the status route too', (await statusOf({ sessionId: 'x'.repeat(129) })).error.code, 'bad-request')
+
+const statusFenced = await callRoute({ sessionId: SESSION, at: STATUS_PATH, rejection: () => 401 })
+const statusFenceless = await withoutFence(() => callRoute({ sessionId: SESSION, at: STATUS_PATH }))
+const statusWrongMethod = await callRoute({ sessionId: SESSION, at: STATUS_PATH, method: 'POST' })
+check('the status route asks the same fence first', [statusFenced.status, statusFenced.body], [401, 'unauthorized'])
+check('the status route fails closed without the fence', [statusFenceless.status, statusFenceless.body], [503, 'trust fence unavailable'])
+check('the status route allows GET only', [statusWrongMethod.status, statusWrongMethod.headers.allow], [405, 'GET'])
+check('the status answer is never cached', (await callRoute({ sessionId: SESSION, at: STATUS_PATH })).headers['cache-control'], 'no-store')
 
 // --- AC6: the read path never writes ----------------------------------------------------
 async function snapshot(root) {
@@ -565,8 +703,16 @@ check('both halves agree on the route prefix', [
   hostSource.includes("const ROUTE_PREFIX = '/trellis-statusline'"),
   clientSource.includes("const ROUTE_PREFIX = '/trellis-statusline'"),
 ], [true, true])
-check('both halves agree on the endpoint', endpointsIn(hostSource), ['task/read'])
-check('the client calls the endpoint the host handles', endpointsIn(clientSource), endpointsIn(hostSource))
+// The host is a superset on purpose: `status/read` belongs to the hub, which is not this
+// bundle. The pill still calls exactly one endpoint, and the host handles exactly the two it
+// documents — so neither a stray literal nor a missing handler can pass here.
+check('the host handles the two documented endpoints', endpointsIn(hostSource), ['status/read', 'task/read'])
+check('the pill calls exactly the endpoint it needs', endpointsIn(clientSource), ['task/read'])
+check(
+  'every endpoint the pill calls is one the host handles',
+  endpointsIn(clientSource).every((endpoint) => endpointsIn(hostSource).includes(endpoint)),
+  true,
+)
 
 await rm(scratch, { recursive: true, force: true })
 

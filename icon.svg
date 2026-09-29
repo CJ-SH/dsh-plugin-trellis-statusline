@@ -1,0 +1,18 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- The pill's own two shapes: the statusline capsule on top, the task tree under it. -->
+  <rect x="1" y="1" width="34" height="34" rx="9" fill="url(#a)" fill-opacity="0.85" />
+  <g stroke="#FFFFFF" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="7.5" y="7.5" width="21" height="9.5" rx="4.75" />
+    <path d="M12.6 12.25H23" />
+    <path d="M9 22.6H16.4" />
+    <path d="M12.3 22.6V27.6" />
+    <path d="M15.2 27.6H25.6" />
+  </g>
+  <circle cx="10" cy="12.25" r="1.25" fill="#FFFFFF" />
+  <defs>
+    <linearGradient id="a" x1="18" y1="1" x2="18" y2="35" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AC2FF" />
+      <stop offset="1" stop-color="#4A65E8" />
+    </linearGradient>
+  </defs>
+</svg>

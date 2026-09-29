@@ -20,6 +20,24 @@ const results = []
 const check = (label, actual, expected) => {
   results.push({ label, ok: JSON.stringify(actual) === JSON.stringify(expected), actual, expected })
 }
+/**
+ * Print every result and set the exit code.
+ *
+ * A guard below calls this early: without the header cell there is no round trip to run, and a
+ * missing seat must read as a *named* failure instead of a TypeError.
+ */
+function report() {
+  const failed = results.filter((entry) => !entry.ok)
+  for (const entry of results) {
+    console.log(
+      `${entry.ok ? 'PASS' : 'FAIL'}  ${entry.label}` +
+        (entry.ok ? '' : `\n      expected ${JSON.stringify(entry.expected)}\n      actual   ${JSON.stringify(entry.actual)}`),
+    )
+  }
+  console.log(`\n${results.length - failed.length}/${results.length} passed`)
+  process.exitCode = failed.length === 0 ? 0 : 1
+  return failed.length
+}
 
 const SESSION = 'session-66d44746-abbf-4a3d-bd21-a9374eae2bd1'
 // A session that never wrote a pointer: it must get the workspace count, never a title.
@@ -135,7 +153,10 @@ await writeFile(
 
 // --- Run the real Host half over it --------------------------------------------------------
 const host = await import(hostUrl.href)
-let routeHandler = null
+// One entry per route: the Host half owns two now (the pill's read and the hub's status
+// surface), and this harness drives the pill's, so it resolves by path rather than by whichever
+// registration happened to land last.
+const hostRoutes = new Map()
 const hostServices = {
   sessions: {
     get: (id) => (id === SESSION || id === OTHER_SESSION ? { header: { id, cwd: scratch } } : undefined),
@@ -144,7 +165,7 @@ const hostServices = {
   connection: { requestRejection: () => undefined },
   webServer: {
     register(route) {
-      routeHandler = route.handler
+      hostRoutes.set(route.path, route)
       return () => undefined
     },
   },
@@ -163,11 +184,14 @@ function makeRes() {
   }
   return res
 }
-/** One real request straight into the registered route. */
+/** One real request straight into the registered route the browser half calls. */
 async function askHost(sessionId, method = 'GET') {
   const res = makeRes()
   const query = sessionId === undefined ? '' : `?sessionId=${encodeURIComponent(sessionId)}`
-  await routeHandler({ method, url: `/trellis-statusline/task/read${query}`, headers: {} }, res)
+  const path = '/trellis-statusline/task/read'
+  const handler = hostRoutes.get(path)?.handler
+  if (handler === undefined) throw new Error(`no route is registered at ${path}`)
+  await handler({ method, url: `${path}${query}`, headers: {} }, res)
   return { status: res.status, body: res.body, parsed: res.body === undefined ? undefined : JSON.parse(res.body) }
 }
 
@@ -187,17 +211,62 @@ const client = factory((request) => {
 })
 
 const caught = []
+/**
+ * The slot registry's contract, in miniature (`dsh-client-ui-renderer/lib/client.js:1343-1402`):
+ * `register` refuses a seat nobody declared, and `inject` runs its callback only while a
+ * declaration is live. A fake that called back immediately would hand this harness a cell the
+ * shell never mounts, which is the false green prd.md R11 exists to remove.
+ */
+const seatsDeclared = new Set()
+const seatWaiters = new Map()
+function declareSeat(key) {
+  if (seatsDeclared.has(key)) return
+  seatsDeclared.add(key)
+  for (const reconcile of [...(seatWaiters.get(key) ?? [])]) reconcile()
+}
+const slots = {
+  inject(key, callback) {
+    let contribution
+    let live = true
+    const reconcile = () => {
+      if (!live) return
+      if (!seatsDeclared.has(key)) {
+        const dispose = contribution
+        contribution = undefined
+        if (typeof dispose === 'function') dispose()
+        return
+      }
+      if (contribution === undefined) contribution = callback() ?? undefined
+    }
+    const watchers = seatWaiters.get(key) ?? new Set()
+    watchers.add(reconcile)
+    seatWaiters.set(key, watchers)
+    reconcile()
+    return () => {
+      live = false
+      watchers.delete(reconcile)
+      const dispose = contribution
+      contribution = undefined
+      if (typeof dispose === 'function') dispose()
+    }
+  },
+  register(options, component) {
+    if (!seatsDeclared.has(options.name)) {
+      throw new Error(`slot "${options.name}" is not declared (a parent entry's children table must declare it)`)
+    }
+    caught.push({ options, component })
+    return () => undefined
+  },
+}
+// The shell's own client half declares both seats; this plugin's half loads against them.
+declareSeat('conversation.session.header.actions')
+declareSeat('conversation.input.dock')
+
 // Requests the harness still owes an answer for; `settle` waits for them, because the host
 // half below reads a real `.trellis` tree and one tick is not always enough.
 let inFlight = 0
 const clientServices = {
-  slots: {
-    inject: (key, callback) => callback(),
-    register: (options, component) => {
-      caught.push({ options, component })
-      return () => undefined
-    },
-  },
+  slots,
   locale: { getLocale: () => ({ active: 'zh' }), register: () => () => undefined },
 }
 
@@ -227,6 +296,18 @@ client.apply(ctx)
 
 const Cell = caught[0]?.component
 check('the client registered a cell to drive', typeof Cell, 'function')
+// The seat is the whole reason a cell exists, so the cross-half round trip below is driven by a
+// cell that a declaration produced — not by one a permissive fake invented (prd.md R11).
+check('the cell came from the header seat declaration', caught[0]?.options.name, 'conversation.session.header.actions')
+
+// Without the header cell there is no round trip to observe, and the checks above have already
+// named the missing seat. Requiring the *header* seat specifically means the dock cell cannot
+// stand in for it.
+if (caught[0]?.options.name !== 'conversation.session.header.actions') {
+  await rm(scratch, { recursive: true, force: true })
+  report()
+  process.exit(1)
+}
 
 function render(sessionId = SESSION) {
   active = Cell
@@ -329,12 +410,4 @@ check('no task and no count renders nothing at all', [blankPill, flatten(blankPi
 
 await rm(scratch, { recursive: true, force: true })
 
-const failed = results.filter((entry) => !entry.ok)
-for (const entry of results) {
-  console.log(
-    `${entry.ok ? 'PASS' : 'FAIL'}  ${entry.label}` +
-      (entry.ok ? '' : `\n      expected ${JSON.stringify(entry.expected)}\n      actual   ${JSON.stringify(entry.actual)}`),
-  )
-}
-console.log(`\n${results.length - failed.length}/${results.length} passed`)
-process.exitCode = failed.length === 0 ? 0 : 1
+report()

@@ -14,6 +14,24 @@ const results = []
 const check = (label, actual, expected) => {
   results.push({ label, ok: JSON.stringify(actual) === JSON.stringify(expected), actual, expected })
 }
+/**
+ * Print every result and set the exit code.
+ *
+ * A guard below calls this early: a cell that was never mounted cannot be driven, and that must
+ * be a *named* failure rather than a TypeError further down.
+ */
+function report() {
+  const failed = results.filter((entry) => !entry.ok)
+  for (const entry of results) {
+    console.log(
+      `${entry.ok ? 'PASS' : 'FAIL'}  ${entry.label}` +
+        (entry.ok ? '' : `\n      expected ${JSON.stringify(entry.expected)}\n      actual   ${JSON.stringify(entry.actual)}`),
+    )
+  }
+  console.log(`\n${results.length - failed.length}/${results.length} passed`)
+  process.exitCode = failed.length === 0 ? 0 : 1
+  return failed.length
+}
 
 // --- Minimal hook runtime, one store per component ----------------------------------------
 const stores = new WeakMap()
@@ -133,14 +151,69 @@ let reply = { ok: true, value: { status: 'ok', task: TASK } }
 let rejectNext = false
 
 const caught = []
-const services = {
-  slots: {
-    inject: (key, callback) => callback(),
-    register: (options, component) => {
+/**
+ * The slot registry's contract, in miniature (`dsh-client-ui-renderer/lib/client.js:1343-1402`,
+ * `dsh-client-ui-slots/lib/index.js:163-165`): `register` refuses a seat nobody declared, and
+ * `inject` runs its callback only while a declaration is live — synchronously when it already
+ * exists, at declaration time otherwise, and disposed again when the declaration collapses.
+ *
+ * Calling the callback immediately is the fake that would keep this harness green after the
+ * header seat was renamed, with `caught` full of cells no shell would ever render (prd.md R11).
+ */
+function makeSlots() {
+  const declared = new Set()
+  const waiting = new Map()
+  const announce = (key) => {
+    for (const reconcile of [...(waiting.get(key) ?? [])]) reconcile()
+  }
+  return {
+    declare(key) {
+      if (declared.has(key)) return
+      declared.add(key)
+      announce(key)
+    },
+    inject(key, callback) {
+      let contribution
+      let live = true
+      const reconcile = () => {
+        if (!live) return
+        if (!declared.has(key)) {
+          const dispose = contribution
+          contribution = undefined
+          if (typeof dispose === 'function') dispose()
+          return
+        }
+        if (contribution === undefined) contribution = callback() ?? undefined
+      }
+      const watchers = waiting.get(key) ?? new Set()
+      watchers.add(reconcile)
+      waiting.set(key, watchers)
+      reconcile()
+      return () => {
+        live = false
+        watchers.delete(reconcile)
+        const dispose = contribution
+        contribution = undefined
+        if (typeof dispose === 'function') dispose()
+      }
+    },
+    register(options, component) {
+      if (!declared.has(options.name)) {
+        throw new Error(`slot "${options.name}" is not declared (a parent entry's children table must declare it)`)
+      }
       caught.push({ options, component })
       return () => undefined
     },
-  },
+  }
+}
+
+const slots = makeSlots()
+// The shell declares the two seats this plugin joins, and only then does its client half load.
+slots.declare('conversation.session.header.actions')
+slots.declare('conversation.input.dock')
+
+const services = {
+  slots,
   locale: {
     getLocale: () => ({ active: 'zh' }),
     register: () => () => undefined,
@@ -173,7 +246,22 @@ const Cell = caught[0]?.component
 const DockCell = caught[1]?.component
 check('captured the header cell', typeof Cell, 'function')
 check('captured the dock cell', typeof DockCell, 'function')
+// A cell is only ever captured *because* its seat was declared: rename the seat in the client
+// half and this check turns red, where an immediately-invoked `inject` fake stayed green
+// (prd.md R11 / AC9).
+check('both cells came from a declared seat', caught.map((item) => item.options.name), [
+  'conversation.session.header.actions',
+  'conversation.input.dock',
+])
 check('apply itself starts no interval', intervals.length, 0)
+
+// Nothing below can be about the pill if the header cell never arrived; the checks above have
+// already said which seat is missing. (Both cells are required, so a dock cell standing in for
+// the header one cannot be mistaken for a plugin that works.)
+if (caught.length !== 2) {
+  report()
+  process.exit(1)
+}
 
 // --- Hook runtime driver ------------------------------------------------------------------
 /** Drives any cell this bundle registered, not just the header one. */
@@ -504,12 +592,4 @@ check('no sessionId renders nothing', await settleWith(DockCell, { useSessions: 
 check('a list state without this session renders nothing', await settleWith(DockCell, dockProps(undefined)), null)
 check('a seat without useSessions degrades instead of throwing', await settleWith(DockCell, { sessionId: SESSION }), null)
 
-const failed = results.filter((entry) => !entry.ok)
-for (const entry of results) {
-  console.log(
-    `${entry.ok ? 'PASS' : 'FAIL'}  ${entry.label}` +
-      (entry.ok ? '' : `\n      expected ${JSON.stringify(entry.expected)}\n      actual   ${JSON.stringify(entry.actual)}`),
-  )
-}
-console.log(`\n${results.length - failed.length}/${results.length} passed`)
-process.exitCode = failed.length === 0 ? 0 : 1
+report()

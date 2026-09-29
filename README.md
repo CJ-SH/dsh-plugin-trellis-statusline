@@ -39,7 +39,7 @@ workspace's activity **count** instead — never another session's task.
 
 | | |
 |---|---|
-| **dsh** | with the `web` profile. Verified against `0.1.5-rc.2`; the seats it attaches to are internal, so a dsh upgrade may move them — see [Troubleshooting](#troubleshooting) |
+| **dsh** | `0.2.0-rc.1` or a later `0.2.x`, with the `web` profile. The manifest declares `peerDependencies: { "@deepseek-ai/dsh": "^0.2.0-rc.1" }`, so an incompatible runtime **denies this row at startup with a message** instead of loading a plugin whose seats have moved. Verified against `0.2.0-rc.1`; the seats it attaches to are internal, so a dsh upgrade may move them — see [Troubleshooting](#troubleshooting) |
 | **Node** | `^22.19.0 \|\| >=24.0.0` |
 | **A Trellis-managed workspace** | dsh is Trellis' 22nd supported platform — run `trellis init --dsh` in the workspace ([Trellis docs](https://docs.trytrellis.app/advanced/multi-platform)). The session's working directory then contains `.trellis/`, which is all this plugin reads |
 
@@ -97,7 +97,7 @@ It stores nothing, so uninstalling needs no cleanup.
 
 ### No other bundle's row is touched
 
-The patch inserts one loader row and nothing else. The Host half registers its own route on the
+The patch inserts one loader row and nothing else. The Host half registers its own routes on the
 composition's `webServer` and asks `connection` for the trust fence before every answer
 (`requestRejection` → `401`/`403`, and `503` when that seam is missing) — the same shape the
 shipped `dsh-host-open-in-app` uses.
@@ -107,6 +107,28 @@ An earlier version widened the shipped `connection` row's `inject` instead. That
 made this plugin's availability depend on a piece of another bundle's configuration and on layer
 order. Owning the route removes the coupling: nothing here can be silently taken away by a patch
 collision.
+
+### The read-only status route (for other plugins)
+
+A plugin that only wants to know *whether* this session is on a Trellis task does not have to
+import this package. The Host half owns a second, deliberately narrow route:
+
+```jsonc
+// GET /trellis-statusline/status/read            → the plugin is mounted, no session asked about
+// GET /trellis-statusline/status/read?sessionId=session-<uuid>
+// → 200 { "ok": true, "value": {
+//      "plugin": "dsh-plugin-trellis-statusline",
+//      "status": "ok" | "workspace" | "none" | "unscoped",
+//      "active": true,                       // present only when a session was asked about
+//      "taskId"?, "taskStatus"?,             // `status: "ok"`
+//      "activeTasks"?                        // `status: "workspace"`
+//   } }
+```
+
+It carries **no title and no tree** by construction — the pill's route is the only place a task
+name travels — and it is fenced, `GET`-only and uncached exactly like the pill's route. A `404`
+means the plugin is not installed; `unscoped` means it is, but the caller asked without a session.
+This is the surface the `dsh-plugin-suite` hub's status row reads.
 
 ## What you will see
 
@@ -166,10 +188,12 @@ conversation or from the session log either. See
 **Nothing appears at all.** In order of likelihood: the workspace has no `.trellis/` or holds no
 task; no `dsh_<sessionId>.json` pointer was written for *this* session, which `task.py create` /
 `task.py start` writes — in that case you should be seeing the workspace **count** instead (see
-[Where the task comes from](#where-the-task-comes-from)); another bundle claims the exact route
-`/trellis-statusline/task/read` (the Host logs `[trellis-statusline] route unavailable` at boot);
-or a dsh upgrade moved the seats. The plugin never shows a placeholder and never reports an error —
-an absent pill *is* the failure mode, by design.
+[Where the task comes from](#where-the-task-comes-from)); another bundle claims one of the two
+exact routes (the Host logs `[trellis-statusline] route unavailable` at boot, and each route
+degrades on its own); or a dsh upgrade moved the seats — in which case the manifest's peer range
+denies the row at startup with a message, rather than mounting a plugin that renders nothing. The
+plugin never shows a placeholder and never reports an error — an absent pill *is* the failure mode,
+by design.
 
 **It shows the wrong task.** Both sides read the same pointer, so start with
 `python ./.trellis/scripts/task.py current --source`: the pill shows the task that file names. If
@@ -195,24 +219,26 @@ consumes, the Host half imports nothing beyond `node:` builtins, and the suite a
 
 ```bash
 node --check lib/index.js && node --check lib/client.js   # both halves parse
-npm test                                                  # 209 assertions, four harnesses
+npm test                                                  # 254 assertions, four harnesses
 ```
 
 The harnesses live in the repository, not in the published tarball — `files` ships only `lib`, the
-patch, the README, the design notes and the licence — so run `npm test` from a checkout.
+icon, the two locale files, the patch, the README, the design notes and the licence — so run
+`npm test` from a checkout.
 
 | Harness | Covers |
 |---|---|
-| `test/host.test.mjs` | resolving the task against throwaway workspaces: the pointer as the only title, the workspace count for a session it does not name (scaffold subtracted, `archive` skipped, `0` degrading to `none`), every unusable-pointer state (missing, stale, escaping, corrupt), every tree case, and a before/after hash proof that a read never writes |
-| `test/client.test.mjs` | the bundle contract: id, the `react`-only require, both seats (slot key vs cell id vs order), locale namespace, stylesheet lifecycle, cross-half constants |
+| `test/host.test.mjs` | resolving the task against throwaway workspaces: the pointer as the only title, the workspace count for a session it does not name (scaffold subtracted, `archive` skipped, `0` degrading to `none`), every unusable-pointer state (missing, stale, escaping, corrupt), every tree case, the status surface's value and its fence, and a before/after hash proof that a read never writes |
+| `test/client.test.mjs` | the bundle contract: id, the `react`-only require, both seats (slot key vs cell id vs order), **the seat-declaration lifetime** (a cell exists only while its seat is declared, and a renamed seat leaves none), the manifest's peer gate and display metadata, locale namespace, stylesheet lifecycle, cross-half constants |
 | `test/cell.test.mjs` | the real cells under a minimal hook runtime: all three task pill shapes, the dropdown and its dismissal routes, the dock cell's blank-session gating (including the stale-state trap the move uncovered), the workspace-count pill, and listener/interval cleanup |
 | `test/integration.test.mjs` | the two halves against each other — the real Host half reads a real `.trellis` tree and that exact reply is fed to the real cell, for both a pointed-at task and a pointer-less session (count pill with its decoration glyph, no role, no click target, nothing at all when the count is 0), so a wire-shape drift cannot pass unnoticed |
 
 | File | Role |
 |---|---|
-| `lib/index.js` | Host half — session → cwd → task, and the `/trellis-statusline/task/read` route |
+| `lib/index.js` | Host half — session → cwd → task, and the `/trellis-statusline/task/read` + `/trellis-statusline/status/read` routes |
 | `lib/client.js` | Browser half — the module-loader bundle, the seat registrations, the cell |
 | `cordis.patch.yml` | the loader row; no other bundle's row is patched |
+| `icon.svg`, `locale/en.json`, `locale/zh.json` | the display metadata the shell reads without activating the plugin |
 | `docs/design-notes.md` | why it works this way: the seats, the measurement, the derivation rules |
 
 ## License

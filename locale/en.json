@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Trellis Statusline",
+    "description": "Shows the active Trellis task of the current session beside the chat title, with its parent/subtask role and a clickable task tree."
+  }
+}

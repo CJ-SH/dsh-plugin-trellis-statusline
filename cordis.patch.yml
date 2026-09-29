@@ -3,9 +3,11 @@
 # The plugin reads its input from the session's own working directory and holds no
 # configuration of its own — there is nothing here for a user to edit.
 #
-# No other bundle's row is touched. The Host half registers its own route on the composition's
-# `webServer` and asks `connection` for the trust fence per request (`requestRejection`), so
-# there is no `inject` list to widen and no shipped value to restate.
+# No other bundle's row is touched. The Host half registers its own routes on the composition's
+# `webServer` (`/trellis-statusline/task/read` for its own pill, `/trellis-statusline/status/read`
+# as the read-only status surface other bundles read) and asks `connection` for the trust fence
+# per request (`requestRejection`), so there is no `inject` list to widen and no shipped value to
+# restate.
 - insert:
     - id: trellis-statusline
       name: 'dsh-plugin-trellis-statusline'

@@ -224,6 +224,34 @@ To share one line the anchor itself has to become the row:
   goal panels are unchanged, and the gap keeps the stack's own spacing variable.
 - Both plugins inject this identical rule, so either one alone still lays out sensibly.
 
+### A seat is a declaration *lifetime*, not a promise (2026-09-29)
+
+The seats above belong to another bundle, so the plugin's registration is conditional on a
+declaration that may never come, may collapse, and may come back. `ctx.slots.inject(key, callback)`
+is the whole mechanism, and its contract is narrower than "wait for the seat":
+
+- the callback runs **synchronously** when the declaration already exists, and **inside the
+  declaring `register()`** when it arrives later;
+- collapsing the declaration **disposes** what the callback returned, and a later declaration runs
+  the callback again;
+- `slots.register` **throws** for a slot nobody declared
+  (`dsh-client-ui-slots/lib/index.js:163-165`).
+
+Two consequences that a harness has to model, because both were once silently wrong here:
+
+1. **The failure mode of a moved seat is an absent cell, and nothing else.** No error reaches the
+   plugin, no cell renders, and a test that calls the callback immediately will report a healthy
+   plugin. The three client-side harnesses therefore carry a slot registry that models the
+   lifetime — declare, wait, collapse, re-declare — and the two assertions that would go red on a
+   renamed seat are `every seat the plugin joins is a seat the shell declared` (client) and
+   `the cell came from the header seat declaration` (integration). Both were checked by
+   falsification: renaming `SEAT` in `lib/client.js` turns three harnesses red and leaves the
+   Host harness green, which is the correct split.
+2. **A cell is not a durable registration.** A plugin reload disposes the first fiber's cells
+   before the second mounts, and the real registry refuses a duplicate `(name, id, priority)`, so
+   a harness that mounts twice without unloading is modelling something that cannot happen — the
+   client harness unloads explicitly and asserts both cells went with it.
+
 ### Traps that remain, for whoever touches this next
 
 - **A blank bit is not an enable flag.** `useTaskPill(…, enabled)` stops polling without clearing
@@ -236,7 +264,7 @@ To share one line the anchor itself has to become the row:
 
 ---
 
-## 4. The route, and the fence in front of it
+## 4. The routes, and the fence in front of them
 
 The two halves talk over one route the Host half owns on the composition's `webServer`:
 
@@ -268,10 +296,53 @@ sending `false`. The handler runs four steps, and the order is the design:
 The envelope is deliberately the one the connection service used to carry, and every answer is
 `cache-control: no-store` — a session's task is a live fact, not a cached one.
 
+### The second route: the status surface another bundle reads
+
+The management hub's status area has to answer "did this plugin resolve an active Trellis task?"
+for a session it does not own, and it must do that **without importing this package** — so the
+answer is a route, not an export:
+
+```jsonc
+// GET /trellis-statusline/status/read                      → 200 { ok: true, value: { plugin, status: "unscoped" } }
+// GET /trellis-statusline/status/read?sessionId=session-<uuid>
+// → 200 { "ok": true, "value": {
+//      "plugin": "dsh-plugin-trellis-statusline",   // who answered — a 404 means nobody is home
+//      "status": "ok" | "workspace" | "none" | "unscoped",
+//      "active": true,                              // present only when a session was asked about
+//      "taskId"?, "taskStatus"?,                    // status: "ok"
+//      "activeTasks"?                               // status: "workspace", the pill's own count
+//   } }
+```
+
+Three decisions in that shape are load-bearing:
+
+- **A second endpoint, not a mode of the first.** The pill's reply exists to be rendered as a
+  pill: it carries the task title and the whole tree. A status row is a *light*, and a surface
+  that can never receive a title cannot render one by accident — so the "a session only ever sees
+  the title its own pointer names" rule (prd.md R1/R2) cannot be weakened by a consumer this
+  plugin does not control. The suite asserts the *bytes*, not the intent: the pointed-at title
+  must not appear anywhere in a status reply.
+- **Same chain, not a copy of it.** Both handlers call the same `readTask`, because a second
+  implementation of "which task is this session on" is exactly the thing that would drift — and
+  then the hub would disagree with the pill about the session the user is looking at. Two
+  assertions pin the agreement (the `ok` case and the count case).
+- **`sessionId` is optional here.** A Settings page has no session to report on (the
+  `settings.section` owner props carry only `close`), and that is an answer, not an error:
+  `unscoped` still proves the plugin is mounted and answering, which is the hub's other need. An
+  *unusable* id is still refused — a typo must not read as "nothing to report" — and `active` is
+  omitted rather than sent as `false`, the same convention the tree uses for `current`.
+
+Both routes live behind the fence, both are `exact` (so a request for a path this plugin does not
+own falls through to the shell's 404 seat instead of being interpreted), and each is registered in
+its own `ctx.effect` with its own guard: a duplicate `(kind, path)` degrades **one** surface and
+logs it, rather than silently taking the other down with it.
+
 A browserless probe needs the browser's own cookie, because the fence runs first:
 
 ```bash
 curl -s "http://127.0.0.1:3080/trellis-statusline/task/read?sessionId=session-<uuid>" \
+  -H 'accept: application/json' -b "dsh=<cookie value>"
+curl -s "http://127.0.0.1:3080/trellis-statusline/status/read" \
   -H 'accept: application/json' -b "dsh=<cookie value>"
 ```
 
@@ -313,8 +384,64 @@ would want a node ceiling that skips tree building.
 
 ## 6. Verification
 
-`npm test` runs four dependency-free harnesses — 192 assertions. `test/integration.test.mjs` is the
+`npm test` runs four dependency-free harnesses — 254 assertions. `test/integration.test.mjs` is the
 one worth keeping even if the others are trimmed: the two unit harnesses each assert against a
 *hand-written* idea of the other half's shapes, so a field rename on one side passes both while the
 pill quietly stops rendering. It reads a real `.trellis` tree with the real Host half and feeds
 that exact reply to the real cell.
+
+### A green suite is not evidence until it can go red (2026-09-29)
+
+This package's suite was green while three sibling plugins in the same workspace were dead on the
+runtime — the shared cause was harness fakes that were *more permissive than the real service*.
+Two rules follow, and both are now enforced here:
+
+- **A fake may not be kinder than the real thing.** The slot registry's callback is not invoked
+  immediately, `register` refuses an undeclared seat, and a route handler is addressed by path
+  rather than "the last one registered" — each of those was the exact gap that hid a real failure.
+- **Every anti-false-green assertion gets a falsification run.** Measured, not asserted:
+
+  | Broken on purpose | Observed |
+  |---|---|
+  | `SEAT` renamed in `lib/client.js` | `client.test.mjs` 4 named FAILs, `cell.test.mjs` 2, `integration.test.mjs` 1; exit 1 in all three |
+  | a `title` added to the status value | `host.test.mjs` 3 FAILs, including `no title can travel on the status surface` |
+  | the peer range changed to `^0.2.0` | `client.test.mjs` FAIL — and the real startup gate denies that range (`dsh-app-boot` `evaluatePluginCompatibility`) |
+
+  The peer range itself was checked against that same real function: `^0.2.0-rc.1` is accepted on
+  `0.2.0-rc.1`, while `^0.2.0`, `^0.1.5-rc.1` and an empty string are denied — prereleases only
+  participate because the gate passes `includePrerelease: true`, so the caret *must* be written
+  against the prerelease itself.
+
+---
+
+## 7. Packaging: the two manifest facts that fail silently
+
+**The peer range is the upgrade guard, and writing it the obvious way disables the plugin.**
+`@deepseek-ai/dsh-app-boot` evaluates every declared `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*`
+peer against the *running* version and **denies the row** when a range does not satisfy it
+(`lib/index.js:286-313`); a package with no `peerDependencies` at all is skipped early and never
+checked — which is how a plugin can be "installed, enabled, and dead" with no diagnostic in the
+UI. `semver.satisfies` runs with `includePrerelease: true`, so `0.2.0-rc.1` lies inside
+`^0.2.0-rc.1` but **not** inside `^0.2.0`: the caret has to be written against the prerelease, and
+that is not a style choice. One peer is enough — the runtime check compares versions, and
+non-`@deepseek-ai` peers (the bundle's `react` baseline, for instance) are not gated at all. This
+plugin imports no `@deepseek-ai/*` module, so `@deepseek-ai/dsh` is the only entry it declares.
+
+**Display text lives in `locale/*.json`, not in a manifest `meta`.** The reader
+(`dsh-app-boot/lib/index.js:1860-1999`) resolves `<pkg>/locale/en.json` **through Node's ESM
+resolver** and reads `meta.title` / `meta.description` from every `*.json` beside it, using the
+manifest's `name`/`description` only as the fallback — so:
+
+- each locale file is `{ "meta": { "title": …, "description": … } }`, and the shell's own packages
+  are the reference (`dsh-client-ui-schedule/locale/en.json`);
+- `exports` must list `"./locale/*.json"`, because an unlisted subpath is unreachable, not merely
+  undocumented — the localised title would silently fall back to the package name;
+- `icon` is read straight from the manifest directory instead, so it needs no `exports` entry, but
+  it must be relative, inside that directory, `.svg`/`.png`/`.jpg`/`.webp`, and at most 256 KiB;
+- both belong in `files`, or a published tarball ships without them.
+
+The failure mode of all of the above is a card with no title and the default artwork — never an
+error, which is why the client harness asserts the shape, the exports entry and the `files` entry,
+and the icon's size on disk.
+
+

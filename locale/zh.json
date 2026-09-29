@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Trellis 状态栏",
+    "description": "在会话标题旁显示当前会话正在进行的 Trellis 任务，含父任务/子任务角色与可点击的任务树。"
+  }
+}
