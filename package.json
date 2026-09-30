@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-trellis-statusline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shows the active Trellis task of the current workspace in the dsh web chat, with parent/subtask roles and a clickable task tree.",
   "icon": "./icon.svg",
   "type": "module",
