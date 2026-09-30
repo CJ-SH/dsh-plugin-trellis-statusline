@@ -1,11 +1,38 @@
 # dsh-plugin-trellis-statusline
 
-Show the active [Trellis](https://github.com/mindfold-ai/Trellis) task of the current workspace in
-the [dsh](https://github.com/deepseek-ai/deepseek-harness) web chat — the job the Claude Code
-`statusline.py` hook does in a terminal, and a statusline dsh's web shell does not have.
+[English](README.md) | 中文
 
-This one is a *statusline*: a single compact pill, always visible, in the chat you are already
-looking at.
+Show the active [Trellis](https://github.com/mindfold-ai/Trellis) task of the current workspace in the [dsh](https://github.com/deepseek-ai/deepseek-harness) web chat — the job the Claude Code `statusline.py` hook does in a terminal, and a statusline dsh's web shell does not have.
+
+## Features
+
+- **Session header**: a persistent task pill to the right of the session-preset selector.
+- **New-session view**: before the first message has been sent, the pill appears in the composer's dock line just above the input card, sharing that line with the usage pill.
+- The pill reads `[priority] title · status`, and marks the task's role in the task tree (parent task / subtask).
+- When the task belongs to a tree the pill is clickable; the dropdown shows the tree indented in its real shape and highlights the session's task.
+- Read-only: it never writes to Trellis and never starts, switches or archives a task; when the workspace holds no task it shows nothing.
+- A session without a task of its own shows the workspace's active-task **count** — never another session's task.
+
+## Install
+
+### From GitHub (recommended)
+
+```bash
+dsh plugin --profile web add github:CJ-SH/dsh-plugin-trellis-statusline
+```
+
+### From a local directory
+
+```bash
+git clone https://github.com/CJ-SH/dsh-plugin-trellis-statusline
+dsh plugin --profile web add ./dsh-plugin-trellis-statusline
+```
+
+**Restart dsh** after installing — a plugin is loaded at boot, and the restart ends any running agent process, so run it yourself. No configuration is needed.
+
+## Usage
+
+The pill sits in the session header (right of the session-preset selector), or in the dock line just above the input card for a new session. Four shapes:
 
 ```
 [P2] Add the importer · 进行中
@@ -14,80 +41,15 @@ looking at.
 工作区 3 个活动任务
 ```
 
-<!-- A screenshot is the single most valuable thing this README is missing. Drop one in and
-     uncomment:
-![The pill in the session header, and the task tree dropdown](docs/pill.png)
--->
+- Stand-alone task: `[P2] Title · 进行中` — no role, no click target, no tab stop.
+- Root of the task tree: `[P1] Title · 进行中 · 父任务`; every other member of the tree, grandchildren included: `... · 子任务`.
+- Session has no task of its own but the workspace does: `工作区 N 个活动任务`, led by a single list icon — no title, no role.
 
-## What it is
+The display refreshes every 10 s, and immediately when you switch sessions, so `task.py start` / `task.py archive` shows up within one poll.
 
-Trellis keeps each piece of work as a **task** under `.trellis/tasks/` and records which one a
-session is on. dsh's web shell shows the workspace and the model, but not the task — so you have to
-switch back to a terminal, or ask the agent, to find out what you are actually working on.
+Configuration: none. The plugin reads the session it is rendered in and holds no settings.
 
-This plugin puts that fact in the chat:
-
-- **the session header**, right of the session-preset selector, as a compact pill;
-- **the new-session view**, for a session whose first message has not been sent yet — in the
-  composer's dock line just above the input card, sharing that line with the usage pill.
-
-It is a pure read: it never writes to Trellis, starts or archives nothing, and shows nothing at all
-when the workspace holds no task. A session that has no Trellis task of its own shows the
-workspace's activity **count** instead — never another session's task.
-
-## Requirements
-
-| | |
-|---|---|
-| **dsh** | `0.2.0-rc.1` or a later `0.2.x`, with the `web` profile. The manifest declares `peerDependencies: { "@deepseek-ai/dsh": "^0.2.0-rc.1" }`, so an incompatible runtime **denies this row at startup with a message** instead of loading a plugin whose seats have moved. Verified against `0.2.0-rc.1`; the seats it attaches to are internal, so a dsh upgrade may move them — see [Troubleshooting](#troubleshooting) |
-| **Node** | `^22.19.0 \|\| >=24.0.0` |
-| **A Trellis-managed workspace** | dsh is Trellis' 22nd supported platform — run `trellis init --dsh` in the workspace ([Trellis docs](https://docs.trytrellis.app/advanced/multi-platform)). The session's working directory then contains `.trellis/`, which is all this plugin reads |
-
-It needs **no Python and no `trellis` CLI at runtime**. Unlike plugins that drive `task.py`, this one
-only reads the JSON Trellis writes.
-
-## Install
-
-This package is a dsh **bundle**: it declares `dsh.bundle` with a `cordis.patch.yml`, and installing
-it appends the bundle to the profile and applies its patch layer
-([official guide](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish)).
-
-From npm — **not published yet**, this is the command once it is:
-
-```bash
-dsh plugin --profile web add dsh-plugin-trellis-statusline
-```
-
-Today, install straight from the repository. Either a clone:
-
-```bash
-git clone https://github.com/CJ-SH/dsh-plugin-trellis-statusline
-dsh plugin --profile web add ./dsh-plugin-trellis-statusline
-```
-
-…or the git URL, which needs no clone of your own:
-
-```bash
-dsh plugin --profile web add github:CJ-SH/dsh-plugin-trellis-statusline
-```
-
-The git route works here without the usual `prepare` script and `allowBuilds` allowance, because
-there is nothing to build: `lib/` is plain JavaScript committed to the repository, so a git install
-already fetches runnable artifacts. A plugin written in TypeScript would need both, and the
-allowance is permission to run its code on your machine at install time — see
-[the official note](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/publish).
-
-Then check the row landed and **restart dsh** — loading a plugin happens at boot, and the restart
-ends any agent process, so run it yourself:
-
-```bash
-dsh --profile web --dump-config | grep trellis-statusline
-```
-
-A working install needs no configuration: the plugin reads the session it is rendered in and holds
-no settings.
-
-### Uninstall
+## Uninstall
 
 ```bash
 dsh plugin --profile web remove dsh-plugin-trellis-statusline
@@ -95,156 +57,18 @@ dsh plugin --profile web remove dsh-plugin-trellis-statusline
 
 It stores nothing, so uninstalling needs no cleanup.
 
-### No other bundle's row is touched
+## Technical notes
 
-The patch inserts one loader row and nothing else. The Host half registers its own routes on the
-composition's `webServer` and asks `connection` for the trust fence before every answer
-(`requestRejection` → `401`/`403`, and `503` when that seam is missing) — the same shape the
-shipped `dsh-host-open-in-app` uses.
+- Needs dsh `0.2.0-rc.1` or a later `0.2.x`, with the `web` profile; on a version mismatch the row is denied at startup with a message, rather than loading a plugin whose seats have moved.
+- Needs Node `^22.19.0 || >=24.0.0`.
+- Needs a Trellis-managed workspace: run `trellis init --dsh` in it, and the session's working directory contains `.trellis/`, which is all this plugin reads.
+- No Python and no `trellis` CLI at runtime — it only reads the JSON Trellis writes.
+- The pill's title is truncated to 48 characters, while the rows in the task-tree dropdown are not; the seats it attaches to are dsh internals, so a dsh upgrade may move them.
 
-An earlier version widened the shipped `connection` row's `inject` instead. That is what
-`connection.rpc.handle` needs — it registers its physical route on *that* row's context — and it
-made this plugin's availability depend on a piece of another bundle's configuration and on layer
-order. Owning the route removes the coupling: nothing here can be silently taken away by a patch
-collision.
+## Further reading
 
-### The read-only status route (for other plugins)
-
-A plugin that only wants to know *whether* this session is on a Trellis task does not have to
-import this package. The Host half owns a second, deliberately narrow route:
-
-```jsonc
-// GET /trellis-statusline/status/read            → the plugin is mounted, no session asked about
-// GET /trellis-statusline/status/read?sessionId=session-<uuid>
-// → 200 { "ok": true, "value": {
-//      "plugin": "dsh-plugin-trellis-statusline",
-//      "status": "ok" | "workspace" | "none" | "unscoped",
-//      "active": true,                       // present only when a session was asked about
-//      "taskId"?, "taskStatus"?,             // `status: "ok"`
-//      "activeTasks"?                        // `status: "workspace"`
-//   } }
-```
-
-It carries **no title and no tree** by construction — the pill's route is the only place a task
-name travels — and it is fenced, `GET`-only and uncached exactly like the pill's route. A `404`
-means the plugin is not installed; `unscoped` means it is, but the caller asked without a session.
-This is the surface the `dsh-plugin-suite` hub's status row reads.
-
-## What you will see
-
-The pill reads `[priority] title · status`. Four shapes:
-
-| The session | The pill reads |
-|---|---|
-| is on a stand-alone task | `[P2] Title · 进行中` — no role, no click target, no tab stop |
-| is on the tree's root | `[P1] Title · 进行中 · 父任务` |
-| is on any other member of the tree | `[P2] Title · 进行中 · 子任务` |
-| has no task of its own, but the workspace does | `工作区 3 个活动任务` led by a 14×14 list-checks glyph — no title, no role, no click target | |
-
-**Only two roles exist.** The tree's top ancestor is the one and only 父任务; every other member —
-grandchildren included — is a 子任务. Depth never changes the wording, so a deep tree stays
-readable.
-
-**When the task is in a tree the pill becomes clickable.** The dropdown shows the real structure
-(one indent level per depth, with a guide line) and highlights the session's task. A stand-alone
-task is not clickable at all — no button, no focus ring, no tab stop.
-
-The display refreshes every 10 s, and immediately when the header switches to another session, so a
-`task.py start` or `task.py archive` shows up within one poll.
-
-## Where the task comes from
-
-1. **The session's working directory** — from the live session's own header, or from the workspace
-   registry, which also covers sessions that are no longer live.
-2. **The session pointer** — `.trellis/.runtime/sessions/dsh_<sessionId>.json`, which
-   `task.py create` / `task.py start` writes. It is the **only** source of a title, and what it
-   names is shown whatever its status or branch.
-3. **The workspace count** — when no pointer names a task, every non-`archive`
-   `.trellis/tasks/<dir>/task.json` is counted (minus `trellis init`'s never-started
-   `00-bootstrap-guidelines` scaffolding task). The reply carries **no title**, and the pill says
-   `工作区 N 个活动任务`. This is the same number Claude Code's statusline prints as `N task(s)`;
-   it is the only honest thing to say about a session that has not started a task yet. A count of 0
-   shows nothing.
-
-It does not fall back to scanning `.trellis/tasks/` for a *title*: a scan cannot tell which session
-is working on which task. In the reported bug one workspace held three dsh sessions, each on a
-different task, and all three were shown the same task as 父任务. It does not infer a task from the
-conversation or from the session log either. See
-[design notes](./docs/design-notes.md#1-resolving-the-task).
-
-## What it does not do
-
-- **It never writes.** The Host half imports `node:fs/promises` for `readFile` and `readdir` and
-  holds no write path at all; the self-check proves a full read leaves `.trellis/` byte-identical.
-- It does not start, switch or archive tasks — that stays `task.py`'s job. The dropdown is a view,
-  not a control: its rows are not clickable.
-- It does not repeat what dsh already shows (model, tokens, elapsed time).
-- It does not guess. A session without a pointer gets no task name at all — only the
-  workspace count — and no placeholder or "best effort" title ever appears — see
-  [Where the task comes from](#where-the-task-comes-from).
-
-## Troubleshooting
-
-**Nothing appears at all.** In order of likelihood: the workspace has no `.trellis/` or holds no
-task; no `dsh_<sessionId>.json` pointer was written for *this* session, which `task.py create` /
-`task.py start` writes — in that case you should be seeing the workspace **count** instead (see
-[Where the task comes from](#where-the-task-comes-from)); another bundle claims one of the two
-exact routes (the Host logs `[trellis-statusline] route unavailable` at boot, and each route
-degrades on its own); or a dsh upgrade moved the seats — in which case the manifest's peer range
-denies the row at startup with a message, rather than mounting a plugin that renders nothing. The
-plugin never shows a placeholder and never reports an error — an absent pill *is* the failure mode,
-by design.
-
-**It shows the wrong task.** Both sides read the same pointer, so start with
-`python ./.trellis/scripts/task.py current --source`: the pill shows the task that file names. If
-the file itself names the wrong task (next entry), that is Trellis state to fix, not the plugin's.
-
-**A session that is working on a task shows only the count.** The session has no pointer. The
-usual cause:
-dsh was launched from inside another Trellis session — a Claude Code or Codex window, say — and
-Trellis 0.6.15 inherited that session's `TRELLIS_CONTEXT_ID` and wrote the runtime pointer under the
-*outer* context key (the general case is tracked upstream,
-[`mindfold-ai/Trellis#549`](https://github.com/mindfold-ai/Trellis/issues/549); 0.6.15 fixed it for
-dsh specifically). Unset `TRELLIS_CONTEXT_ID` before starting dsh, or run
-`python ./.trellis/scripts/task.py start .trellis/tasks/<dir>` in the dsh session itself. A session
-without a pointer shows the workspace count rather than another session's task.
-
-**It appears in one session but not another.** That is the design: each session reports its own
-working directory, so parallel sessions in different workspaces show different tasks.
-
-## Development
-
-No dependencies and no build step: the browser half is written directly in the form the shell
-consumes, the Host half imports nothing beyond `node:` builtins, and the suite asserts both.
-
-```bash
-node --check lib/index.js && node --check lib/client.js   # both halves parse
-npm test                                                  # 254 assertions, four harnesses
-```
-
-The harnesses live in the repository, not in the published tarball — `files` ships only `lib`, the
-icon, the two locale files, the patch, the README, the design notes and the licence — so run
-`npm test` from a checkout.
-
-| Harness | Covers |
-|---|---|
-| `test/host.test.mjs` | resolving the task against throwaway workspaces: the pointer as the only title, the workspace count for a session it does not name (scaffold subtracted, `archive` skipped, `0` degrading to `none`), every unusable-pointer state (missing, stale, escaping, corrupt), every tree case, the status surface's value and its fence, and a before/after hash proof that a read never writes |
-| `test/client.test.mjs` | the bundle contract: id, the `react`-only require, both seats (slot key vs cell id vs order), **the seat-declaration lifetime** (a cell exists only while its seat is declared, and a renamed seat leaves none), the manifest's peer gate and display metadata, locale namespace, stylesheet lifecycle, cross-half constants |
-| `test/cell.test.mjs` | the real cells under a minimal hook runtime: all three task pill shapes, the dropdown and its dismissal routes, the dock cell's blank-session gating (including the stale-state trap the move uncovered), the workspace-count pill, and listener/interval cleanup |
-| `test/integration.test.mjs` | the two halves against each other — the real Host half reads a real `.trellis` tree and that exact reply is fed to the real cell, for both a pointed-at task and a pointer-less session (count pill with its decoration glyph, no role, no click target, nothing at all when the count is 0), so a wire-shape drift cannot pass unnoticed |
-
-| File | Role |
-|---|---|
-| `lib/index.js` | Host half — session → cwd → task, and the `/trellis-statusline/task/read` + `/trellis-statusline/status/read` routes |
-| `lib/client.js` | Browser half — the module-loader bundle, the seat registrations, the cell |
-| `cordis.patch.yml` | the loader row; no other bundle's row is patched |
-| `icon.svg`, `locale/en.json`, `locale/zh.json` | the display metadata the shell reads without activating the plugin |
-| `docs/design-notes.md` | why it works this way: the seats, the measurement, the derivation rules |
+Contracts, troubleshooting and internal structure live in [docs/design-notes.md](docs/design-notes.md).
 
 ## License
 
-[MIT](./LICENSE) © 2026 HenTaiCJN
-
-[Trellis](https://github.com/mindfold-ai/Trellis) is a separate project by Mindfold LLC, licensed
-AGPL-3.0-only. This plugin is not affiliated with it, and neither bundles nor derives from its
-code: it reads the `.trellis/` files Trellis writes.
+MIT © 2026 HenTaiCJN
